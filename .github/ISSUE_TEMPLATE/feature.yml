@@ -1,0 +1,36 @@
+name: ✨ Feature request
+description: Suggest a change or addition
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem you're trying to solve
+      description: What can't you do today? Be concrete.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: How would you solve it? Code sketches welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you try / think about?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope sanity
+      description: We tend to reject feature requests that grow the surface area. Tick all that apply.
+      options:
+        - label: This wouldn't add a new direct Go dependency.
+        - label: This wouldn't grow the binary by more than ~5%.
+        - label: This is opt-in / disabled by default.
+        - label: I'd be willing to submit the PR myself.

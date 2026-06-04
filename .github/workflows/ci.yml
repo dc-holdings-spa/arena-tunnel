@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Build matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: |
+            client/go.sum
+            server/go.sum
+
+      - name: Build server
+        env:
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          mkdir -p dist
+          cd server
+          go build -trimpath -ldflags "-s -w" \
+            -o "../dist/arena-tunnel-server-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./...
+
+      - name: Build client
+        env:
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          cd client
+          go build -trimpath -ldflags "-s -w" \
+            -o "../dist/arena-tunnel-client-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./...
+
+      - name: Smoke size check
+        run: |
+          for f in dist/*; do
+            sz=$(stat -c%s "$f")
+            if [ "$sz" -lt 1000000 ]; then
+              echo "::error::$f is suspiciously small ($sz bytes)"
+              exit 1
+            fi
+            echo "OK $f ($sz bytes)"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 14
+
+  lint:
+    name: Lint + vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: |
+            client/go.sum
+            server/go.sum
+
+      - name: gofmt
+        run: |
+          changed=$(gofmt -l server client)
+          if [ -n "$changed" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$changed"
+            exit 1
+          fi
+
+      - name: go vet (server)
+        run: cd server && go vet ./...
+
+      - name: go vet (client)
+        run: cd client && go vet ./...

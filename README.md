@@ -1,168 +1,204 @@
-# byoc2-tunnel
+<div align="center">
 
-WireGuard-over-WebSocket tunnel for Adversario Arena's BYOC2 (Bring Your Own CobaltStrike) tier.
+# arena-tunnel
 
-Two binaries, both pure Go (CGO disabled, statically linked):
+**WireGuard over WebSocket. Single Go binary. Free public ingress through any CDN.**
 
-- **`server/`** — WebSocket↔UDP forwarder. Listens HTTP, upgrades to WSS, shovels binary frames between the WS connection and a local UDP socket (typically the WireGuard kernel interface on the same host).
-- **`client/`** (a.k.a. `arena-byoc`) — Single-binary student client. Embeds [wireguard-go](https://git.zx2c4.com/wireguard-go) for the WG protocol, [gorilla/websocket](https://github.com/gorilla/websocket) for transport. Creates a TUN device, configures WG via in-process IPC, wraps WG UDP through WSS to the server. Credentials are baked at compile-time via `-ldflags -X` so the student downloads a single binary and runs it with zero configuration.
+[![Build](https://github.com/dc-holdings-spa/arena-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/dc-holdings-spa/arena-tunnel/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/dc-holdings-spa/arena-tunnel?logo=github)](https://github.com/dc-holdings-spa/arena-tunnel/releases)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-orange.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/dc-holdings-spa/arena-tunnel)](https://goreportcard.com/report/github.com/dc-holdings-spa/arena-tunnel)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/dc-holdings-spa/arena-tunnel?filename=client%2Fgo.mod)](client/go.mod)
 
-## Why this exists
+</div>
 
-Adversario Arena runs out of a home network in Chile behind CGNAT — no public IPv4. CobaltStrike beacon callbacks need a stable, reachable ingress. Options ruled out:
+---
 
-| Option | Why not |
-|---|---|
-| VPS rental | Diego rejected monthly rental cost |
-| Cloudflare Spectrum (UDP proxy) | $200+/mo, enterprise tier |
-| Tailscale | Vendor lock-in, depends on tailscale.com being alive |
-| Native WireGuard with port-forward | CGNAT ISP, no public v4; ISP modem v6 firewall blocks inbound |
-| Hardware UART hack on the ISP modem | Possible, but invasive |
+`arena-tunnel` punches a WireGuard VPN through any HTTP/HTTPS path — including a free Cloudflare Tunnel. No VPS rental. No Cloudflare Spectrum. No vendor lock-in. Two small Go binaries, one cleanly defined wire protocol.
 
-The remaining viable path: tunnel WireGuard's UDP datagrams **inside binary WebSocket frames** and let Cloudflare's free tier proxy them. Cloudflare proxies WS natively, no Spectrum needed. The server runs on a local LAN host (arena-manager); a cloudflared tunnel exposes it as `wg-byoc.adversario.cl:443`.
+Built for [Adversario Arena](https://arena.adversario.cl) — a Red Team training platform that needed a public ingress from a CGNAT-only home network. Released under AGPL-3.0 so anyone in the same boat can lift it for their own self-hosted setup.
 
-Latency cost: ~80–150 ms one-way from most of LATAM via the CF route. Acceptable for C2 callbacks with `sleep ≥ 30s`.
+## Why
+
+WireGuard speaks UDP. Most free CDNs (Cloudflare Free, Fastly, Bunny) only proxy HTTP/WS. The expensive workarounds — Cloudflare Spectrum, a Hetzner UDP relay, Tailscale's DERP servers — either cost monthly money or lock you into a third party.
+
+`arena-tunnel` solves it by encapsulating each WireGuard UDP datagram inside one binary WebSocket frame. The server unwraps frames back into UDP packets and hands them to a local WireGuard kernel interface. The CDN sees what looks like a long-lived WSS session — perfectly normal traffic for a chat app or a notification service.
+
+Result: a **stable, encrypted, NAT-traversing tunnel that costs $0/month** and survives hostile networks (corporate proxies, captive portals, ISP-imposed CGNAT). Latency cost: ~80–150 ms one-way through a free CF tunnel from most of LATAM. Fine for everything except synchronous-RTT-sensitive workloads.
 
 ## Architecture
 
 ```
-Student box                         Cloudflare                arena-manager (private)
-─────────────                       ──────────                ──────────────────────
-arena-byoc binary                                             byoc2-tunnel-server
-   ├─ wireguard-go (TUN)                                          ↑
-   └─ WSS dialer ─────────► wss://wg-byoc.... ─► cloudflared ─►   │  HTTP/WS upgrade
-                                                                  ▼
-                                                              wg-byoc kernel iface
-                                                                  ↓
-                                                              MASQUERADE → OPNsense
-                                                              → scenario VLANs
+   Client side                      Public CDN                         Server side
+─────────────────────         ────────────────────────         ──────────────────────────
+arena-tunnel-client                                            arena-tunnel-server
+   ├─ wireguard-go (TUN)                                            ↑
+   └─ WSS dialer ──► wss://your-host/... ──► cloudflared ──►        │  WS upgrade
+                          (free tier)                               ▼
+                                                              WireGuard kernel iface
+                                                                    │
+                                                                    ▼
+                                                              MASQUERADE / route
+                                                                    │
+                                                                    ▼
+                                                              Your internal network
 ```
 
-Inside one binary WebSocket frame = exactly one WireGuard UDP datagram. No framing on top. The server dials UDP to its `--wg` target (default `127.0.0.1:51820`, the kernel WG socket) on each new WS connection so WireGuard sees a distinct UDP source per concurrent student.
+**Wire protocol**: one WS binary frame ↔ one UDP datagram. No framing on top. Nothing to reverse-engineer. ~50 lines of glue in each direction.
 
-Credentials embedded in the client at build time (via `-ldflags`):
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the long form (threat model, MTU math, why we don't multiplex, alternatives considered).
 
-- `main.privKeyB64` — base64 WireGuard private key for this student
-- `main.serverPubKeyB64` — base64 WireGuard server public key
-- `main.tunnelIP` — assigned tunnel IP (e.g. `10.201.0.5`)
-- `main.serverHost` — WSS endpoint hostname (e.g. `wg-byoc.adversario.cl`)
+## Quick start
 
-## Build
+### Server (your network)
 
-### Server
+Requires a running WireGuard server on the same host (kernel or userspace) and a way to publish your HTTP port (`cloudflared tunnel`, `ngrok`, etc).
 
 ```bash
-cd server
-go build -o byoc2-tunnel-server
-./byoc2-tunnel-server --listen 127.0.0.1:8888 --wg 127.0.0.1:51820
+# 1. Set up WireGuard the normal way; here's a minimal server config:
+cat > /etc/wireguard/wg0.conf <<'EOF'
+[Interface]
+PrivateKey = <server-priv>
+ListenPort = 51820
+Address    = 10.200.0.1/24
+
+[Peer]
+PublicKey  = <client-pub>
+AllowedIPs = 10.200.0.2/32
+EOF
+systemctl enable --now wg-quick@wg0
+
+# 2. Run arena-tunnel server (forwards WSS → WG UDP)
+go install github.com/dc-holdings-spa/arena-tunnel/server@latest
+arena-tunnel-server --listen 127.0.0.1:8888 --wg 127.0.0.1:51820
+
+# 3. Expose 127.0.0.1:8888 publicly via your CDN of choice.
+#    With cloudflared, add an ingress rule routing
+#    wss://wg.example.com → http://127.0.0.1:8888.
 ```
 
-Flags:
+### Client (anywhere on Internet)
 
-- `--listen` — HTTP bind address (default `127.0.0.1:8888`). Use loopback because cloudflared terminates TLS upstream.
-- `--wg` — UDP target where unwrapped WG datagrams go (default `127.0.0.1:51820`).
-- `--idle-timeout` — drop a UDP tunnel after N idle (default `5m`).
-
-### Client (generic)
+Download the matching binary from [Releases](https://github.com/dc-holdings-spa/arena-tunnel/releases) and run it (root/Administrator required for the TUN device — same as Tailscale, OpenVPN, WireGuard):
 
 ```bash
-cd client
-go build -o arena-byoc
-./arena-byoc -priv <b64> -pub <b64> -ip 10.201.0.5 -host wg-byoc.adversario.cl
+# Linux / macOS — pass creds via flags
+chmod +x arena-tunnel-client-linux-amd64
+sudo ./arena-tunnel-client-linux-amd64 \
+  -priv  <peer-priv-b64> \
+  -pub   <server-pub-b64> \
+  -ip    10.200.0.2 \
+  -host  wg.example.com
 ```
 
-Flags (override the baked values):
+Or build with credentials baked in for a zero-config UX — see [Build](#build) below.
 
-- `-priv` — student WG private key (base64)
-- `-pub` — server WG public key (base64)
-- `-ip` — student's assigned tunnel IP
-- `-host` — WSS server hostname
-- `-v` — verbose WireGuard logs
-
-### Client (per-student baked binary)
-
-The intended distribution model. Use the helper script:
-
-```bash
-./build.sh \
-  "<priv-b64>" \
-  "<server-pub-b64>" \
-  "10.201.0.5" \
-  "wg-byoc.adversario.cl" \
-  linux amd64 \
-  ./arena-byoc-linux-amd64
-```
-
-The arena-manager API calls this on every `POST /api/byoc2/enroll` to produce a per-student, per-platform binary that needs zero runtime configuration. Cross-compiles to:
-
-- linux/amd64, linux/arm64
-- darwin/amd64, darwin/arm64
-- windows/amd64
-
-`assets/wintun-amd64.dll` is bundled into the Windows download ZIP because Windows requires the [wintun](https://www.wintun.net/) driver to create TUN devices.
-
-## Run (client)
-
-```bash
-# Linux / macOS — needs root for /dev/net/tun
-sudo ./arena-byoc
-
-# Windows — needs Administrator; wintun.dll must sit next to the .exe
-.\arena-byoc-windows-amd64.exe
-```
-
-Expected log:
-
-```
+```text
 [tun] creating device "arena-byoc"
-[+] WG up: tunnelIP=10.201.0.5 server=wg-byoc.adversario.cl local-udp-port=43902
-[wss] dialing wss://wg-byoc.adversario.cl/tunnel
+[+] WG up: tunnelIP=10.200.0.2 server=wg.example.com local-udp-port=43902
+[wss] dialing wss://wg.example.com/tunnel
 [wss] connected
 ```
 
-After connect, a network interface named `arena-byoc` exists with IP `10.201.0.5/24`. Ping the gateway:
+A new network interface called `arena-byoc` exists with IP `10.200.0.2`. Ping the gateway:
 
 ```bash
-ping 10.201.0.1
+ping 10.200.0.1
 ```
 
-To route specific subnets through the tunnel (e.g. scenario VLANs):
+## Build
+
+The client is designed to be **per-user, per-platform compiled** by an issuing service, with credentials baked at build time via Go's `-ldflags`. The end user downloads one binary, runs it, gets a tunnel — no config file, no env vars, no copy-pasting keys.
+
+`build.sh` is the helper your control plane shells out to:
 
 ```bash
-sudo ip route add 10.128.130.0/24 dev arena-byoc
+./build.sh \
+  "<peer-priv-b64>" \
+  "<server-pub-b64>" \
+  "10.200.0.2" \
+  "wg.example.com" \
+  linux amd64 \
+  ./arena-tunnel-client-linux-amd64
 ```
 
-## Wire protocol
+Cross-compile matrix:
 
-Trivial. One binary WS frame = one UDP datagram, both directions.
+| OS      | Arch   | Binary size  | Notes                                                                                   |
+|---------|--------|--------------|-----------------------------------------------------------------------------------------|
+| linux   | amd64  | ~6 MB        | statically linked, CGO disabled                                                          |
+| linux   | arm64  | ~6 MB        | same                                                                                     |
+| darwin  | amd64  | ~6 MB        | Intel Macs                                                                               |
+| darwin  | arm64  | ~6 MB        | Apple Silicon                                                                            |
+| windows | amd64  | ~6 MB        | ships with `wintun.dll` from [wintun.net](https://www.wintun.net/) (bundled in `assets/`) |
 
-- Client → server: each `binary` frame is delivered verbatim to the configured UDP target (default the local kernel WG socket).
-- Server → client: each UDP datagram received is delivered verbatim as one `binary` frame.
+Or use the `Makefile`:
 
-Text frames are ignored. No framing on top of the WS frames. The MTU is whatever WireGuard sets on the TUN (`1380` by default in this client) minus standard WG overhead.
+```bash
+make build           # local platform
+make build-all       # all 5 platforms (writes to dist/)
+make release         # tag + push (used by CI)
+```
 
-No multiplexing — one WS connection = one tunnel. Multiple students get separate WS connections.
+## Configuration
 
-## Files
+### Server flags
+
+| Flag             | Default              | Meaning                                                                            |
+|------------------|----------------------|------------------------------------------------------------------------------------|
+| `--listen`       | `127.0.0.1:8888`     | HTTP bind. Loopback because CDN terminates TLS upstream.                            |
+| `--wg`           | `127.0.0.1:51820`    | Where unwrapped UDP datagrams go                                                    |
+| `--idle-timeout` | `5m`                 | Drop a UDP tunnel after N idle                                                      |
+
+### Client flags (override baked values)
+
+| Flag      | Meaning                                              |
+|-----------|------------------------------------------------------|
+| `-priv`   | Client WG private key (base64)                       |
+| `-pub`    | Server WG public key (base64)                        |
+| `-ip`     | Tunnel IP assigned to this client (e.g. `10.200.0.2`)|
+| `-host`   | WSS hostname (e.g. `wg.example.com`)                 |
+| `-v`      | Verbose WireGuard logs                               |
+
+### Compile-time variables (preferred for production)
+
+Set via `go build -ldflags "-X main.X=Y"`:
 
 ```
-byoc2-tunnel/
-├── README.md          ← you are here
-├── build.sh           ← per-student baked-binary build helper
-├── server/
-│   ├── go.mod
-│   ├── go.sum
-│   └── main.go        ← 152 LOC server
-├── client/
-│   ├── go.mod
-│   ├── go.sum
-│   └── main.go        ← ~400 LOC client (wireguard-go + WSS)
-└── assets/
-    └── wintun-amd64.dll  ← required for Windows TUN
+main.privKeyB64        — client WG private key
+main.serverPubKeyB64   — server WG public key
+main.tunnelIP          — client's tunnel IP
+main.serverHost        — WSS hostname
+main.tunnelName        — TUN interface name (default "arena-byoc")
 ```
+
+## Threat model
+
+- **Confidentiality**: end-to-end via WireGuard ChaCha20-Poly1305 between client and server. The CDN sees an opaque WSS stream — no plaintext IPs, no scenario names, no command payloads.
+- **Authenticity**: WireGuard's noise handshake. Public keys are pre-shared per peer (typed at config time or baked into the client binary).
+- **Replay/MITM**: WireGuard handles both. The CDN-side TLS is a defence in depth.
+- **The CDN itself**: trust boundary. Cloudflare sees connection metadata (timestamps, IPs, byte counts) but not content. Choose your CDN accordingly. If you don't want CF to see traffic patterns, swap in another fronting service — the protocol is CDN-agnostic.
+- **Single-binary baked credentials**: if a user shares their binary, the recipient gets full tunnel access for the same peer slot. Treat the binary like an SSH private key. Most platforms (including Adversario) rotate the peer on revocation so a leaked binary is dead within minutes.
+
+The full model is in [SECURITY.md](SECURITY.md). Vulnerability reports: [security@adversario.cl](mailto:security@adversario.cl).
+
+## Status
+
+Released as `v0.1.x`. Used in production by [Adversario Arena](https://arena.adversario.cl) since June 2026 to give BYOC2-tier students a WG ingress without renting a VPS. Pre-`v1.0`, the WS path may change. After `v1.0`, the wire protocol is stable.
+
+## Contributing
+
+Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop, coding style, and what kinds of changes are likely to be accepted. Be excellent: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
-Released under AGPL-3.0 alongside the rest of the open-sourced subset of Adversario Arena. See `../../LICENSE` if present.
+[AGPL-3.0](LICENSE). If you ship a service backed by a modified version of this code, you must publish the modifications under the same license. The protocol itself is not patented and is documented in [ARCHITECTURE.md](ARCHITECTURE.md) so anyone can reimplement.
 
-Forks must remain open. The tunnel transport is intentionally minimal and unopinionated; if you want to lift it for your own self-hosted setup, you only need `server/`, `client/`, and `build.sh` — they're standalone with no Adversario-specific code.
+## Related work / inspiration
+
+- [WireGuard](https://www.wireguard.com/) — the underlying VPN
+- [wireguard-go](https://git.zx2c4.com/wireguard-go/) — userspace WG used by the client
+- [wstunnel](https://github.com/erebe/wstunnel) — the Rust project that inspired the protocol shape (we wrote our own to drop the external dep)
+- [Tailscale](https://tailscale.com/) — for proving you can run WG everywhere if you build the control plane
+- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — the no-cost public ingress we lean on
+- [wintun](https://www.wintun.net/) — Windows TUN driver, bundled

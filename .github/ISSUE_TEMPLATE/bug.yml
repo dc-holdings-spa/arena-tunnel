@@ -1,0 +1,74 @@
+name: 🐛 Bug report
+description: Something is broken or behaving unexpectedly
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact commands, configs, and the order you ran them.
+      placeholder: |
+        1. Build with `make build`
+        2. Run server with `arena-tunnel-server --listen ...`
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `arena-tunnel-client --version` (or git commit hash)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Linux (specify distro + kernel below)
+        - macOS Intel
+        - macOS Apple Silicon
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-detail
+    attributes:
+      label: OS detail
+      description: e.g. "Debian 12, kernel 6.1" or "macOS 14.5"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant client/server logs. Use ` ``` ` fences. Run with `-v` for verbose WG output.
+      render: shell
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Sanity check
+      options:
+        - label: I searched existing issues for a duplicate.
+          required: true
+        - label: I'm not reporting a security vulnerability (those go to security@adversario.cl).
+          required: true
