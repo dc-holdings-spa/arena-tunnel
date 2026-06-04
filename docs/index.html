@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>arena-tunnel — WireGuard over WebSocket</title>
+<meta name="description" content="Single-binary Go tunnel that punches WireGuard through any CDN. Free public ingress without VPS rental.">
+<meta property="og:title" content="arena-tunnel">
+<meta property="og:description" content="Single-binary Go tunnel that punches WireGuard through any CDN. Free public ingress without VPS rental.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://dc-holdings-spa.github.io/arena-tunnel/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ff4d4d'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='monospace' font-weight='bold' font-size='18' fill='white'%3E~%3C/text%3E%3C/svg%3E">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0a0a0a; --fg:#e5e5e5; --dim:#888; --accent:#ff4d4d; --accent2:#ff8888;
+    --line:#262626; --code:#141414; --mono:'JetBrains Mono','Fira Code',ui-monospace,monospace;
+  }
+  body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{color:var(--accent2);text-decoration:underline}
+  code,pre{font-family:var(--mono);font-size:0.92em}
+  code{background:var(--code);padding:0.1em 0.4em;border-radius:3px;color:#fcb}
+  pre{background:var(--code);padding:1.2em;border-radius:6px;overflow-x:auto;border-left:3px solid var(--accent);margin:1em 0}
+  pre code{background:none;padding:0;color:var(--fg)}
+  .container{max-width:980px;margin:0 auto;padding:0 1.5rem}
+  header{padding:5rem 0 3rem;border-bottom:1px solid var(--line);background:radial-gradient(ellipse at top,rgba(255,77,77,0.08),transparent 60%)}
+  h1{font-family:var(--mono);font-size:2.8rem;font-weight:700;letter-spacing:-0.02em}
+  h1 .tilde{color:var(--accent)}
+  .sub{color:var(--dim);font-size:1.1rem;margin-top:0.4rem;max-width:700px}
+  .badges{margin-top:1.4rem;display:flex;flex-wrap:wrap;gap:0.5rem}
+  .badges img{height:20px}
+  .nav{margin-top:2rem;display:flex;gap:1.5rem;font-family:var(--mono);font-size:0.95rem}
+  .nav a{color:var(--dim);text-transform:uppercase;letter-spacing:0.08em}
+  .nav a:hover{color:var(--accent)}
+  section{padding:3.5rem 0;border-bottom:1px solid var(--line)}
+  section:last-of-type{border-bottom:none}
+  h2{font-family:var(--mono);font-size:1.6rem;font-weight:600;margin-bottom:1.5rem;display:flex;align-items:center;gap:0.6rem}
+  h2::before{content:"//";color:var(--accent);font-weight:400}
+  h3{font-size:1.15rem;margin:1.8rem 0 0.6rem;color:var(--accent2)}
+  p{margin-bottom:1rem;color:#ccc}
+  ul,ol{margin:0.6rem 0 1.2rem 1.5rem;color:#ccc}
+  li{margin-bottom:0.4rem}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.2rem;margin-top:1.5rem}
+  .card{background:var(--code);padding:1.4rem;border-radius:6px;border:1px solid var(--line);transition:border-color 0.15s}
+  .card:hover{border-color:var(--accent)}
+  .card h3{margin-top:0;color:var(--fg);font-family:var(--mono);font-size:1rem}
+  .card p{font-size:0.92rem;color:var(--dim);margin-bottom:0}
+  table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.92rem}
+  th,td{padding:0.6em 1em;text-align:left;border-bottom:1px solid var(--line)}
+  th{color:var(--accent);font-family:var(--mono);font-weight:600;font-size:0.85em;text-transform:uppercase;letter-spacing:0.05em}
+  td{color:#ccc}
+  td code{font-size:0.88em}
+  .ascii{background:var(--code);padding:1.5rem;border-radius:6px;overflow-x:auto;border:1px solid var(--line);font-family:var(--mono);font-size:0.8rem;line-height:1.45;color:#9cb}
+  footer{padding:3rem 0;text-align:center;color:var(--dim);font-size:0.9rem;border-top:1px solid var(--line)}
+  footer a{color:var(--dim);text-decoration:underline}
+  .cta{display:inline-block;padding:0.8em 1.4em;background:var(--accent);color:#000;font-weight:600;border-radius:6px;margin-right:0.5rem;font-family:var(--mono)}
+  .cta:hover{background:var(--accent2);color:#000;text-decoration:none}
+  .cta.secondary{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  .cta.secondary:hover{background:rgba(255,77,77,0.1)}
+  @media (max-width: 640px){h1{font-size:2rem}.nav{gap:1rem;flex-wrap:wrap}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <h1><span class="tilde">~</span>/arena-tunnel</h1>
+    <p class="sub">WireGuard over WebSocket. Single Go binary. Free public ingress through any CDN — no VPS rental, no Cloudflare Spectrum, no vendor lock-in.</p>
+    <div class="badges">
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel/actions/workflows/ci.yml"><img src="https://github.com/dc-holdings-spa/arena-tunnel/actions/workflows/ci.yml/badge.svg" alt="Build"></a>
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel/releases"><img src="https://img.shields.io/github/v/release/dc-holdings-spa/arena-tunnel?logo=github" alt="Release"></a>
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-orange.svg" alt="License"></a>
+      <a href="https://goreportcard.com/report/github.com/dc-holdings-spa/arena-tunnel"><img src="https://goreportcard.com/badge/github.com/dc-holdings-spa/arena-tunnel" alt="Go Report"></a>
+    </div>
+    <nav class="nav">
+      <a href="#why">Why</a>
+      <a href="#how">How it works</a>
+      <a href="#quickstart">Quick start</a>
+      <a href="#download">Download</a>
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel">GitHub →</a>
+    </nav>
+    <div style="margin-top:2.5rem">
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest" class="cta">Download v0.1.0</a>
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel" class="cta secondary">View source</a>
+    </div>
+  </div>
+</header>
+
+<section id="why">
+  <div class="container">
+    <h2>Why this exists</h2>
+    <p>WireGuard speaks UDP. Most free CDNs (Cloudflare Free, Fastly, Bunny) only proxy HTTP/WS. The expensive workarounds — Cloudflare Spectrum, a Hetzner UDP relay, Tailscale's DERP servers — either cost monthly money or lock you into a third party.</p>
+    <p><code>arena-tunnel</code> solves it by encapsulating each WireGuard UDP datagram inside one binary WebSocket frame. The server unwraps frames back into UDP packets and hands them to a local WireGuard kernel interface. The CDN sees what looks like a long-lived WSS session — perfectly normal traffic for a chat app or a notification service.</p>
+    <p>Result: a <strong>stable, encrypted, NAT-traversing tunnel that costs $0/month</strong> and survives hostile networks (corporate proxies, captive portals, ISP-imposed CGNAT). Latency cost: ~80–150 ms one-way through a free CF tunnel from most of LATAM.</p>
+  </div>
+</section>
+
+<section id="how">
+  <div class="container">
+    <h2>How it works</h2>
+    <pre class="ascii">   Client side                      Public CDN                         Server side
+─────────────────────         ────────────────────────         ──────────────────────────
+arena-tunnel-client                                            arena-tunnel-server
+   ├─ wireguard-go (TUN)                                            ↑
+   └─ WSS dialer ──► wss://your-host/... ──► cloudflared ──►        │  WS upgrade
+                          (free tier)                               ▼
+                                                              WireGuard kernel iface
+                                                                    │
+                                                                    ▼
+                                                              MASQUERADE / route
+                                                                    │
+                                                                    ▼
+                                                              Your internal network</pre>
+    <p style="margin-top:1.5rem"><strong>Wire protocol:</strong> one WS binary frame ↔ one UDP datagram. No framing on top. Nothing to reverse-engineer. ~50 lines of glue in each direction. <a href="https://github.com/dc-holdings-spa/arena-tunnel/blob/main/ARCHITECTURE.md">Read the full ARCHITECTURE.md →</a></p>
+
+    <div class="grid">
+      <div class="card">
+        <h3>$0/month</h3>
+        <p>No VPS, no Spectrum, no Tailscale subscription. Cloudflare Free tier carries all the traffic.</p>
+      </div>
+      <div class="card">
+        <h3>One static binary</h3>
+        <p>~6 MB Go binary per platform. No installer, no runtime, no config file required.</p>
+      </div>
+      <div class="card">
+        <h3>End-to-end encrypted</h3>
+        <p>WireGuard ChaCha20-Poly1305 inside. TLS 1.3 outside. The CDN sees opaque WSS frames.</p>
+      </div>
+      <div class="card">
+        <h3>Hostile-network friendly</h3>
+        <p>Hotel WiFi, corporate proxies, captive portals. WSS:443 passes where raw UDP can't.</p>
+      </div>
+      <div class="card">
+        <h3>Per-user baked credentials</h3>
+        <p>The control plane bakes WG keys into each user's binary via <code>-ldflags</code>. No copy-paste keys.</p>
+      </div>
+      <div class="card">
+        <h3>AGPL-3.0</h3>
+        <p>Forks must remain open. Standard for security infra.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="container">
+    <h2>Quick start</h2>
+
+    <h3>Server (your network)</h3>
+    <p>Run alongside a WireGuard server on the same host. Expose the HTTP port through Cloudflare Tunnel (or any other CDN that proxies WS).</p>
+    <pre><code># 1. Standard WireGuard server config
+[Interface]
+PrivateKey = &lt;server-priv&gt;
+ListenPort = 51820
+Address    = 10.200.0.1/24
+
+[Peer]
+PublicKey  = &lt;client-pub&gt;
+AllowedIPs = 10.200.0.2/32
+
+# 2. Run arena-tunnel server
+arena-tunnel-server --listen 127.0.0.1:8888 --wg 127.0.0.1:51820
+
+# 3. Cloudflared ingress rule
+#    wss://wg.example.com → http://127.0.0.1:8888</code></pre>
+
+    <h3>Client (anywhere on Internet)</h3>
+    <pre><code># Linux / macOS — needs root for /dev/net/tun
+sudo ./arena-tunnel-client-linux-amd64 \
+  -priv &lt;peer-priv-b64&gt; \
+  -pub  &lt;server-pub-b64&gt; \
+  -ip   10.200.0.2 \
+  -host wg.example.com</code></pre>
+    <p>Or build with credentials baked in via <code>build.sh</code> for a zero-config UX.</p>
+  </div>
+</section>
+
+<section id="download">
+  <div class="container">
+    <h2>Download</h2>
+    <p>Grab the matching binary from the latest release:</p>
+    <div class="grid">
+      <a class="card" href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest/download/arena-tunnel-client-linux-amd64">
+        <h3>Linux x86_64</h3>
+        <p>Most servers, desktops, x86 laptops.</p>
+      </a>
+      <a class="card" href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest/download/arena-tunnel-client-linux-arm64">
+        <h3>Linux ARM64</h3>
+        <p>Raspberry Pi 4/5, AWS Graviton, Oracle Ampere.</p>
+      </a>
+      <a class="card" href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest/download/arena-tunnel-client-darwin-amd64">
+        <h3>macOS Intel</h3>
+        <p>Pre-M1 Mac.</p>
+      </a>
+      <a class="card" href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest/download/arena-tunnel-client-darwin-arm64">
+        <h3>macOS Apple Silicon</h3>
+        <p>M1, M2, M3, M4 — all Apple Silicon Macs.</p>
+      </a>
+      <a class="card" href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest/download/arena-tunnel-windows-amd64.zip">
+        <h3>Windows x86_64</h3>
+        <p>ZIP includes wintun.dll. Run as Administrator.</p>
+      </a>
+      <a class="card" href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest/download/SHA256SUMS">
+        <h3>SHA256SUMS</h3>
+        <p>Verify integrity with <code>sha256sum -c</code>.</p>
+      </a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Trust model</h2>
+    <table>
+      <tr><th>What's protected</th><th>How</th></tr>
+      <tr><td>Tunnel payload (your traffic)</td><td>WireGuard ChaCha20-Poly1305 — end-to-end</td></tr>
+      <tr><td>The transport leg</td><td>TLS 1.3 between client/server and Cloudflare</td></tr>
+      <tr><td>WG private keys</td><td>Generated server-side, baked into binary, never in JSON</td></tr>
+      <tr><td>Peer authenticity</td><td>WireGuard noise handshake; static pubkeys</td></tr>
+    </table>
+    <p style="margin-top:1.5rem">The CDN sees connection metadata but not content. Read <a href="https://github.com/dc-holdings-spa/arena-tunnel/blob/main/SECURITY.md">SECURITY.md</a> for the full threat model.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>Built for <a href="https://arena.adversario.cl">Adversario Arena</a>. AGPL-3.0. Code at <a href="https://github.com/dc-holdings-spa/arena-tunnel">github.com/dc-holdings-spa/arena-tunnel</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>
