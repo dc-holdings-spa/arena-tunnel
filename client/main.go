@@ -1,17 +1,23 @@
 // arena-byoc — single-binary BYOC2 client.
-// - Creates a userspace WireGuard device on a TUN interface
-// - Wraps WG UDP traffic over WSS to wg-byoc.adversario.cl/tunnel
-// - All credentials baked in at compile time via -ldflags -X
 //
-// Run as root (Linux/macOS) or Administrator (Windows). TUN needs CAP_NET_ADMIN.
+// Two ways to ship credentials:
 //
-// Compile (per-student):
-//   go build -ldflags "
-//     -X main.privKeyB64=<peer-priv-b64>
-//     -X main.serverPubKeyB64=<server-pub-b64>
-//     -X main.tunnelIP=10.201.0.5
-//     -X main.serverHost=wg-byoc.adversario.cl
-//   " -o arena-byoc
+//   1. Browser pairing (the new default UX):
+//        $ arena-byoc
+//        → prints a 6-char code, opens https://arena.adversario.cl/byoc2/connect?code=...
+//        → user authorizes in the browser, binary polls /api/byoc2/pair/poll
+//        → creds are written to ~/.config/arena-byoc/config.json (0600)
+//        → subsequent runs read that file and skip the browser flow.
+//
+//   2. Legacy bake-at-build (still supported for headless / CI):
+//        go build -ldflags "-X main.privKeyB64=... -X main.serverPubKeyB64=...
+//                           -X main.tunnelIP=... -X main.serverHost=..."
+//      or use the supplied build.sh, which writes a generated init() file.
+//      Either way, baked creds win over any on-disk config.
+//
+// The binary creates a userspace WireGuard device on a TUN interface and
+// shovels WG UDP traffic over WSS to <serverHost>/tunnel. Run as root
+// (Linux/macOS) or Administrator (Windows) — TUN needs CAP_NET_ADMIN.
 
 package main
 
@@ -19,10 +25,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -32,28 +40,28 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-// Baked at compile-time via -ldflags -X
+// Baked at compile-time via -ldflags -X. Empty on a stock binary.
+// build.sh injects these by generating an init() file at build time.
 var (
 	privKeyB64      = "" // peer (student) WG private key
 	serverPubKeyB64 = "" // arena WG server public key
 	tunnelIP        = "" // e.g. "10.201.0.5"
 	serverHost      = "wg-byoc.adversario.cl"
 	tunnelName      = "arena-byoc"
+
+	// version is overridden via -ldflags -X main.version=...
+	version = "dev"
 )
 
-// CLI overrides (useful for testing without re-compile)
-var (
-	flagPriv = flag.String("priv", "", "override baked priv key (b64)")
-	flagPub  = flag.String("pub", "", "override baked server pub key (b64)")
-	flagIP   = flag.String("ip", "", "override baked tunnel IP")
-	flagHost = flag.String("host", "", "override baked server host")
-	verbose  = flag.Bool("v", false, "verbose WG logs")
-)
+// defaultArenaBaseURL is where the binary talks to the control plane
+// for pairing / status / logout. Override via --arena or ARENA_BYOC_URL.
+const defaultArenaBaseURL = "https://arena.adversario.cl"
 
 func b64ToHex(b64 string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(b64)
@@ -160,6 +168,14 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 	<-subCtx.Done()
 }
 
+// Routes pushed through the tunnel automatically. Covers the entire
+// scenario VLAN supernet (10.128.0.0/9) so students can reach every
+// scenario without remembering to add routes by hand. The tunnel
+// network (10.201.0.0/24) is implicit from the address assignment.
+var pushRoutes = []string{
+	"10.128.0.0/9",
+}
+
 func configureTUN(ipStr string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("interface config only implemented for linux (PR welcome)")
@@ -172,63 +188,285 @@ func configureTUN(ipStr string) error {
 	if err := exec.Command("ip", "link", "set", tunnelName, "up").Run(); err != nil {
 		return fmt.Errorf("ip link set up: %w", err)
 	}
+	// Install routes
+	for _, r := range pushRoutes {
+		// Replace, not add, so re-running over a partial config is safe.
+		if err := exec.Command("ip", "route", "replace", r, "dev", tunnelName).Run(); err != nil {
+			log.Printf("[route] failed to install %s: %v", r, err)
+		} else {
+			log.Printf("[route] %s via %s", r, tunnelName)
+		}
+	}
 	return nil
 }
 
 func teardownTUN() {
 	if runtime.GOOS == "linux" {
+		for _, r := range pushRoutes {
+			exec.Command("ip", "route", "del", r, "dev", tunnelName).Run()
+		}
 		exec.Command("ip", "link", "set", tunnelName, "down").Run()
 		exec.Command("ip", "addr", "flush", "dev", tunnelName).Run()
 	}
 }
 
-func main() {
-	flag.Parse()
+// ---------------- entry point + subcommand dispatch ----------------
 
-	priv := pick(*flagPriv, privKeyB64)
-	srv := pick(*flagPub, serverPubKeyB64)
-	ip := pick(*flagIP, tunnelIP)
-	host := pick(*flagHost, serverHost)
+// rootFlags holds everything parsed from the command line. We use a
+// single flag set rather than per-subcommand sets so the legacy
+// `arena-byoc -priv ... -pub ...` syntax keeps working without forcing
+// the user to remember which subcommand it lived under.
+type rootFlags struct {
+	subcommand string
 
-	if priv == "" || srv == "" || ip == "" {
-		log.Fatalf("missing creds: priv=%q srv=%q ip=%q (compile with -ldflags or pass -priv/-pub/-ip)", priv, srv, ip)
+	// global / cross-cutting
+	arena      string
+	configPath string
+	noBrowser  bool
+	forcePair  bool
+	keepServer bool // logout --keep-server
+	token      string
+
+	// legacy override
+	priv string
+	pub  string
+	ip   string
+	host string
+
+	verbose bool
+}
+
+func parseArgs() *rootFlags {
+	fs := flag.NewFlagSet("arena-byoc", flag.ExitOnError)
+	rf := &rootFlags{}
+
+	fs.StringVar(&rf.arena, "arena", "", "Override arena base URL (env: ARENA_BYOC_URL).")
+	fs.StringVar(&rf.configPath, "config", "", "Override config file path (env: ARENA_BYOC_CONFIG).")
+	fs.BoolVar(&rf.noBrowser, "no-browser", false, "Do not try to launch a browser; print code+URL only.")
+	fs.BoolVar(&rf.forcePair, "force-pair", false, "Ignore cached config and re-pair.")
+	fs.BoolVar(&rf.keepServer, "keep-server", false, "(logout) Only wipe local config; do not call /peer/revoke.")
+	fs.StringVar(&rf.token, "token", "", "Headless: exchange one-shot token for creds.")
+
+	fs.StringVar(&rf.priv, "priv", "", "override baked priv key (b64) — headless")
+	fs.StringVar(&rf.pub, "pub", "", "override baked server pub key (b64) — headless")
+	fs.StringVar(&rf.ip, "ip", "", "override baked tunnel IP — headless")
+	fs.StringVar(&rf.host, "host", "", "override baked server host — headless")
+	fs.BoolVar(&rf.verbose, "v", false, "verbose WG logs")
+
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, usageText)
+		fs.PrintDefaults()
 	}
 
-	privHex, err := b64ToHex(priv)
+	// Pull the optional subcommand off os.Args before flag parsing,
+	// so `arena-byoc logout --keep-server` and `arena-byoc -v` both work.
+	args := os.Args[1:]
+	if len(args) > 0 && !isFlagLike(args[0]) {
+		switch args[0] {
+		case "logout", "status", "pair", "version", "help":
+			rf.subcommand = args[0]
+			args = args[1:]
+		case "--help", "-h":
+			fs.Usage()
+			os.Exit(ExitOK)
+		}
+	}
+	if err := fs.Parse(args); err != nil {
+		// flag.ExitOnError already printed; defensive exit.
+		os.Exit(ExitFatalRuntime)
+	}
+
+	// Environment fallbacks for the two URL-ish settings.
+	if rf.arena == "" {
+		if env := os.Getenv("ARENA_BYOC_URL"); env != "" {
+			rf.arena = env
+		} else {
+			rf.arena = defaultArenaBaseURL
+		}
+	}
+	return rf
+}
+
+func isFlagLike(s string) bool {
+	return len(s) > 0 && s[0] == '-'
+}
+
+const usageText = `arena-byoc — BYOC2 client tunnel for Arena.
+
+Usage:
+  arena-byoc [flags]              Pair if needed, then run tunnel.
+  arena-byoc pair [--force]       Force the browser-pairing flow.
+  arena-byoc logout [--keep-server]
+                                  Wipe local config; revoke peer server-side.
+  arena-byoc status               Show stored identity + ping arena.
+  arena-byoc version              Print build version.
+  arena-byoc help                 Print this message.
+
+Flags:
+`
+
+// dispatchSubcommand fans the parsed flags out to the right entry point.
+// Returns the desired process exit code.
+func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
+	switch rf.subcommand {
+	case "version":
+		fmt.Printf("arena-byoc %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		return ExitOK
+	case "help":
+		fmt.Fprint(os.Stdout, usageText)
+		return ExitOK
+	case "logout":
+		return runLogout(ctx, rf)
+	case "status":
+		return runStatus(ctx, rf)
+	case "pair":
+		// `pair` is just "default with forcePair=true" — fall through.
+		rf.forcePair = true
+		return runDefault(ctx, rf)
+	default:
+		return runDefault(ctx, rf)
+	}
+}
+
+// runDefault is the BOOTSTRAP → PAIR-if-needed → CONNECT path.
+func runDefault(ctx context.Context, rf *rootFlags) int {
+	// 1. Legacy headless overrides win — never read or write the config file.
+	if rf.priv != "" || rf.pub != "" || rf.ip != "" || rf.host != "" {
+		return runConnect(ctx, rf, &Config{
+			Version:      ConfigSchemaVersion,
+			PrivateKey:   pick(rf.priv, privKeyB64),
+			ServerPubKey: pick(rf.pub, serverPubKeyB64),
+			TunnelIP:     pick(rf.ip, tunnelIP),
+			ServerHost:   pick(rf.host, serverHost),
+		})
+	}
+
+	// 2. Baked-at-build creds (from build.sh's generated init) — also skip the file.
+	if privKeyB64 != "" && serverPubKeyB64 != "" && tunnelIP != "" {
+		return runConnect(ctx, rf, &Config{
+			Version:      ConfigSchemaVersion,
+			PrivateKey:   privKeyB64,
+			ServerPubKey: serverPubKeyB64,
+			TunnelIP:     tunnelIP,
+			ServerHost:   serverHost,
+		})
+	}
+
+	// 3. Headless --token: claim straight from server, persist, connect.
+	if rf.token != "" {
+		path, err := ResolveConfigPath(rf.configPath)
+		if err != nil {
+			log.Printf("[config] resolve: %v", err)
+			return ExitFatalRuntime
+		}
+		c := newHTTPClient()
+		claimed, code, err := claimByToken(ctx, c, pairOptions{
+			ArenaBaseURL: rf.arena,
+			ConfigPath:   path,
+			ClientVer:    version,
+		}, rf.token)
+		if err != nil {
+			log.Printf("[pair] %v", err)
+			return code
+		}
+		cfg := &Config{
+			Version:      ConfigSchemaVersion,
+			TunnelIP:     claimed.TunnelIP,
+			PrivateKey:   claimed.PrivateKey,
+			ServerPubKey: claimed.ServerPubKey,
+			ServerHost:   claimed.ServerHost,
+			UserEmail:    claimed.UserEmail,
+			PairedAt:     time.Now().UTC().Format(time.RFC3339),
+			ArenaBaseURL: rf.arena,
+			DeviceID:     claimed.DeviceID,
+		}
+		if err := SaveConfig(path, cfg); err != nil {
+			log.Printf("[config] save: %v (tunnel will still start)", err)
+		}
+		return runConnect(ctx, rf, cfg)
+	}
+
+	// 4. Normal path: load from disk, maybe pair, then connect.
+	path, err := ResolveConfigPath(rf.configPath)
 	if err != nil {
-		log.Fatalf("priv key: %v", err)
-	}
-	srvHex, err := b64ToHex(srv)
-	if err != nil {
-		log.Fatalf("srv pub: %v", err)
+		log.Printf("[config] resolve: %v", err)
+		return ExitFatalRuntime
 	}
 
-	// Open TUN
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		log.Printf("[config] read %s: %v", path, err)
+		if os.IsPermission(err) {
+			return ExitConfigPermDenied
+		}
+		return ExitFatalRuntime
+	}
+
+	if rf.forcePair || cfg == nil || !cfg.Complete() {
+		fresh, exitCode, perr := PairAndPersist(ctx, pairOptions{
+			ArenaBaseURL: rf.arena,
+			ConfigPath:   path,
+			ClientVer:    version,
+			NoBrowser:    rf.noBrowser,
+		})
+		if perr != nil {
+			log.Printf("[pair] %v", perr)
+			return exitCode
+		}
+		cfg = fresh
+	}
+
+	return runConnect(ctx, rf, cfg)
+}
+
+// runConnect is the CONNECT state: stand up WG + TUN + WSS shovel and
+// block on SIGINT.
+func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
+	if cfg.PrivateKey == "" || cfg.ServerPubKey == "" || cfg.TunnelIP == "" {
+		log.Printf("[connect] missing creds (priv/pub/ip)")
+		return ExitFatalRuntime
+	}
+	host := cfg.ServerHost
+	if host == "" {
+		host = serverHost // package default ("wg-byoc.adversario.cl")
+	}
+
+	privHex, err := b64ToHex(cfg.PrivateKey)
+	if err != nil {
+		log.Printf("[connect] priv key: %v", err)
+		return ExitFatalRuntime
+	}
+	srvHex, err := b64ToHex(cfg.ServerPubKey)
+	if err != nil {
+		log.Printf("[connect] srv pub: %v", err)
+		return ExitFatalRuntime
+	}
+
 	log.Printf("[tun] creating device %q", tunnelName)
 	tdev, err := tun.CreateTUN(tunnelName, 1380)
 	if err != nil {
-		log.Fatalf("tun create: %v", err)
+		log.Printf("[tun] create: %v (run as root?)", err)
+		return ExitFatalRuntime
 	}
 
-	// WireGuard logger
 	level := device.LogLevelError
-	if *verbose {
+	if rf.verbose {
 		level = device.LogLevelVerbose
 	}
 	logger := device.NewLogger(level, "[wg] ")
 
-	// WG device with default UDP bind (we let WG pick a local port)
 	dev := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
-	// Local UDP listener that WG will dial as its peer endpoint.
 	udpAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		log.Fatalf("udp listen: %v", err)
+		log.Printf("[udp] listen: %v", err)
+		dev.Close()
+		tdev.Close()
+		return ExitFatalRuntime
 	}
 	localPort := udpConn.LocalAddr().(*net.UDPAddr).Port
 
-	// IPC config
 	ipcConfig := fmt.Sprintf(
 		"private_key=%s\n"+
 			"listen_port=0\n"+
@@ -238,29 +476,39 @@ func main() {
 			"persistent_keepalive_interval=25\n",
 		privHex, srvHex, localPort)
 	if err := dev.IpcSet(ipcConfig); err != nil {
-		log.Fatalf("ipc set: %v", err)
+		log.Printf("[wg] ipc set: %v", err)
+		udpConn.Close()
+		dev.Close()
+		tdev.Close()
+		return ExitFatalRuntime
 	}
 	if err := dev.Up(); err != nil {
-		log.Fatalf("device up: %v", err)
+		log.Printf("[wg] device up: %v", err)
+		udpConn.Close()
+		dev.Close()
+		tdev.Close()
+		return ExitFatalRuntime
 	}
 
-	// Configure TUN address + bring up at the OS level
-	if err := configureTUN(ip); err != nil {
-		log.Fatalf("tun config: %v", err)
+	if err := configureTUN(cfg.TunnelIP); err != nil {
+		log.Printf("[tun] config: %v", err)
+		udpConn.Close()
+		dev.Close()
+		tdev.Close()
+		return ExitFatalRuntime
 	}
 	defer teardownTUN()
 
-	log.Printf("[+] WG up: tunnelIP=%s server=%s local-udp-port=%d", ip, host, localPort)
+	log.Printf("[+] WG up: tunnelIP=%s server=%s local-udp-port=%d", cfg.TunnelIP, host, localPort)
+	if cfg.UserEmail != "" {
+		log.Printf("[+] identity: %s", cfg.UserEmail)
+	}
 
-	// Start WSS shovel
-	ctx, cancel := context.WithCancel(context.Background())
+	shovelCtx, cancel := context.WithCancel(ctx)
 	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
-	go runShovel(ctx, udpConn, wsURL)
+	go runShovel(shovelCtx, udpConn, wsURL)
 
-	// Wait for SIGINT
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	<-ctx.Done()
 	log.Println("[!] shutdown requested")
 	cancel()
 	dev.Close()
@@ -268,6 +516,195 @@ func main() {
 	udpConn.Close()
 	time.Sleep(300 * time.Millisecond)
 	log.Println("[!] bye")
+	return ExitOK
+}
+
+// runLogout — wipe local config, best-effort revoke server-side.
+func runLogout(ctx context.Context, rf *rootFlags) int {
+	path, err := ResolveConfigPath(rf.configPath)
+	if err != nil {
+		log.Printf("[logout] resolve config path: %v", err)
+		return ExitFatalRuntime
+	}
+	cfg, lerr := LoadConfig(path)
+	if lerr != nil && !os.IsNotExist(lerr) {
+		log.Printf("[logout] read %s: %v", path, lerr)
+	}
+	if cfg == nil {
+		fmt.Println("No config to remove.")
+		return ExitOK
+	}
+
+	// Best-effort server-side revoke.
+	if !rf.keepServer {
+		arena := cfg.ArenaBaseURL
+		if arena == "" {
+			arena = rf.arena
+		}
+		if err := bestEffortRevoke(ctx, arena, cfg.PrivateKey); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] could not revoke server-side: %v\n", err)
+		}
+	}
+
+	if err := WipeConfig(path); err != nil {
+		fmt.Fprintf(os.Stderr, "[logout] could not wipe %s: %v\n", path, err)
+		return ExitConfigUnlinkFailed
+	}
+	fmt.Println("Logged out. Config wiped.")
+	return ExitOK
+}
+
+// bestEffortRevoke posts the peer pubkey to /api/byoc2/peer/revoke.
+// The server is expected to mark the peer revoked. Auth is by pubkey
+// ownership — the server already knows which user owns which key.
+func bestEffortRevoke(ctx context.Context, arena, privB64 string) error {
+	if privB64 == "" {
+		return nil
+	}
+	pubB64, err := derivePubKey(privB64)
+	if err != nil {
+		return err
+	}
+	endpoint, err := joinURL(arena, "/api/byoc2/peer/revoke")
+	if err != nil {
+		return err
+	}
+	c := newHTTPClient()
+	body := map[string]string{"publicKey": pubB64}
+	resp, err := doJSON(ctx, c, "POST", endpoint, userAgent(version), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// runStatus — print stored identity + ping arena for liveness.
+func runStatus(ctx context.Context, rf *rootFlags) int {
+	path, err := ResolveConfigPath(rf.configPath)
+	if err != nil {
+		log.Printf("[status] resolve config path: %v", err)
+		return ExitFatalRuntime
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		log.Printf("[status] read %s: %v", path, err)
+		return ExitFatalRuntime
+	}
+	if cfg == nil {
+		fmt.Println("Not paired. Run `arena-byoc` to pair.")
+		return ExitFatalRuntime
+	}
+
+	fmt.Printf("config:       %s\n", path)
+	fmt.Printf("identity:     %s\n", cfg.UserEmail)
+	fmt.Printf("tunnel ip:    %s\n", cfg.TunnelIP)
+	fmt.Printf("server host:  %s\n", cfg.ServerHost)
+	fmt.Printf("paired at:    %s\n", cfg.PairedAt)
+	if cfg.DeviceID != "" {
+		fmt.Printf("device id:    %s\n", cfg.DeviceID)
+	}
+
+	arena := cfg.ArenaBaseURL
+	if arena == "" {
+		arena = rf.arena
+	}
+	state, perr := fetchPeerStatus(ctx, arena, cfg.PrivateKey)
+	if perr != nil {
+		fmt.Printf("arena state:  (unreachable: %v)\n", perr)
+		return ExitOK
+	}
+	fmt.Printf("arena state:  %s\n", state)
+	if state == "revoked" {
+		fmt.Println("Run `arena-byoc pair --force` to re-pair.")
+		return ExitPairInitFailed
+	}
+	return ExitOK
+}
+
+// fetchPeerStatus calls /api/byoc2/peer/status?pubkey=<b64> with a short
+// timeout. Returns the textual state ("active"/"revoked"/"unknown") or
+// an error if the server can't be reached.
+func fetchPeerStatus(ctx context.Context, arena, privB64 string) (string, error) {
+	if privB64 == "" {
+		return "unknown", nil
+	}
+	pubB64, err := derivePubKey(privB64)
+	if err != nil {
+		return "", err
+	}
+	endpoint, err := joinURL(arena, "/api/byoc2/peer/status")
+	if err != nil {
+		return "", err
+	}
+	endpoint += "?pubkey=" + url.QueryEscape(pubB64)
+
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent(version))
+	resp, err := newHTTPClient().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "unknown", nil
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode status: %w", err)
+	}
+	if body.Status == "" {
+		return "unknown", nil
+	}
+	return body.Status, nil
+}
+
+// derivePubKey converts a base64 WireGuard private key into its
+// corresponding base64 public key via curve25519 scalar mult.
+func derivePubKey(privB64 string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(privB64)
+	if err != nil {
+		return "", fmt.Errorf("decode priv: %w", err)
+	}
+	if len(raw) != 32 {
+		return "", fmt.Errorf("priv key wrong length: %d", len(raw))
+	}
+	var priv [32]byte
+	copy(priv[:], raw)
+	// WG private-key clamping: same bit-twiddle as RFC 7748 / wg-quick genkey.
+	priv[0] &= 248
+	priv[31] = (priv[31] & 127) | 64
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return "", fmt.Errorf("curve25519: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(pub), nil
+}
+
+func main() {
+	rf := parseArgs()
+
+	// Root context cancelled on SIGINT/SIGTERM, so PAIR loops and the
+	// CONNECT shovel both exit cleanly without process-wide signal magic.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	code := dispatchSubcommand(ctx, rf)
+	os.Exit(code)
 }
 
 func pick(override, baked string) string {
