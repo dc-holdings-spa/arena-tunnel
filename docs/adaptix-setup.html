@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Adaptix C2 — BYOC2 setup · arena-tunnel</title>
-<meta name="description" content="Build and run Adaptix C2 on your own machine, tunneled into Arena. BYOC2 setup guide.">
+<meta name="description" content="Build and run Adaptix C2 on your own machine, tunneled into Arena. BYOC2 setup guide with example profile + listener.">
 <meta property="og:title" content="arena-tunnel">
 <meta property="og:description" content="Single-binary Go tunnel that punches WireGuard through any CDN. Free public ingress without VPS rental.">
 <meta property="og:type" content="website">
@@ -120,17 +120,34 @@ docker compose --profile build-server-ext down
     <pre><code>cd AdaptixServer/server-dist
 bash ssl_gen.sh        # creates server.rsa.crt / server.rsa.key</code></pre>
 
-    <h3>5 &middot; Edit profile.yaml</h3>
-    <p>Use the <code>profile.yaml</code> shipped in <code>server-dist/</code> (it always matches this version) and set the <code>Teamserver</code> block:</p>
+    <h3>5 &middot; Edit profile.yaml — full example</h3>
+    <p>Start from the <code>profile.yaml</code> shipped in <code>server-dist/</code>, set your password + operators, and keep the <code>extenders</code> list (that's what gives you listeners). The teamserver binds to localhost — your <em>listeners</em> bind to the tunnel IP later (step 7).</p>
     <pre><code>Teamserver:
-  interface: "127.0.0.1"   # your client runs locally
+  interface: "127.0.0.1"          # client runs locally
   port: 4321
   endpoint: "/endpoint"
-  password: "SET-A-STRONG-PASSWORD"
+  password: "CHANGE-ME-strong"    # teamserver password
   only_password: true
+  operators:
+    operator1: "CHANGE-ME-1"
+    operator2: "CHANGE-ME-2"
   cert: "server.rsa.crt"
   key:  "server.rsa.key"
-  # leave the extenders list and HttpServer as shipped</code></pre>
+  extenders:
+    - "extenders/beacon_listener_http/config.yaml"
+    - "extenders/beacon_listener_smb/config.yaml"
+    - "extenders/beacon_listener_tcp/config.yaml"
+    - "extenders/beacon_listener_dns/config.yaml"
+    - "extenders/beacon_agent/config.yaml"
+    - "extenders/gopher_listener_tcp/config.yaml"
+    - "extenders/gopher_agent/config.yaml"
+  access_token_live_hours: 12
+  refresh_token_live_hours: 168
+
+HttpServer:
+  # leave the error/http/tls blocks as shipped — TLS 1.2-1.3, 404 cover page,
+  # Server: AdaptixC2 header. Tune these for your own OPSEC if you want.
+  ...</code></pre>
 
     <h3>6 &middot; Start the teamserver</h3>
     <pre><code>./adaptixserver -profile profile.yaml      # add -debug for logs</code></pre>
@@ -139,9 +156,20 @@ bash ssl_gen.sh        # creates server.rsa.crt / server.rsa.key</code></pre>
     <ol>
       <li>Open the <strong>Adaptix client</strong> (GUI) on your machine.</li>
       <li>Connect to the teamserver: host <code>127.0.0.1</code>, port <code>4321</code>, your password.</li>
-      <li><strong>Create a listener bound to your TUNNEL_IP</strong> (not 0.0.0.0). The public port + endpoint are shown in your redirector slot in Arena.</li>
+      <li><strong>Create an HTTP listener bound to your TUNNEL_IP</strong> (not 0.0.0.0). The public port + endpoint are shown in your redirector slot in Arena.</li>
       <li>Generate your beacon pointing at the redirector's public URL, drop it on the scenario target, and the callback shows up in your client.</li>
     </ol>
+    <p>Example HTTP listener — set these in the client's <em>Create listener</em> form:</p>
+    <pre><code>Host &amp; port (Bind):  TUNNEL_IP : 443
+Method:             GET, POST
+URIs:               /api/v1/status
+                    /updates/check.php
+                    /content.html
+User-Agent:         Mozilla/5.0 (Windows NT 6.2; rv:20.0) Gecko/20121202 Firefox/20.0
+Heartbeat Header:   X-Beacon-Id
+SSL (HTTPS):        on        (auto-generates a cert if you leave it empty)
+Encryption key:     &lt;random 32-hex, the form fills one in&gt;</code></pre>
+    <p>Pick URIs / User-Agent / headers that blend into the scenario's traffic — that is your OPSEC surface. The defaults above are a starting point, not a fingerprint to reuse verbatim.</p>
   </div>
 </section>
 
