@@ -76,13 +76,15 @@
     <nav class="nav">
       <a href="#why">Why</a>
       <a href="#how">How it works</a>
-      <a href="#quickstart">Quick start</a>
+      <a href="#quickstart">Walkthrough</a>
       <a href="#download">Download</a>
+      <a href="#selfhost">Self-host</a>
       <a href="https://github.com/dc-holdings-spa/arena-tunnel">GitHub →</a>
     </nav>
     <div style="margin-top:2.5rem">
-      <a href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest" class="cta">Download v0.1.0</a>
-      <a href="https://github.com/dc-holdings-spa/arena-tunnel" class="cta secondary">View source</a>
+      <a href="https://arena.adversario.cl" class="cta">Start on ARENA</a>
+      <a href="#quickstart" class="cta secondary">Walkthrough</a>
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest" class="cta secondary">Download v0.1.0</a>
     </div>
   </div>
 </header>
@@ -145,7 +147,49 @@ arena-tunnel-client                                            arena-tunnel-serv
 
 <section id="quickstart">
   <div class="container">
-    <h2>Quick start</h2>
+    <h2>Student walkthrough</h2>
+    <p>You bring your own C2. ARENA lends you a <strong>redirector</strong> and this <strong>tunnel</strong> so your team server never touches the public internet — the scenario only ever sees the redirector. Here is the whole path, account → first beacon.</p>
+
+    <h3>1 · Log in to ARENA</h3>
+    <p>Sign in at <a href="https://arena.adversario.cl">arena.adversario.cl</a> with your issued account. Open <strong>Arsenal → Bring Your Own C2</strong>.</p>
+
+    <h3>2 · Download your client</h3>
+    <p>The Bring-Your-Own panel hands you a per-OS download — the same single binary listed under <a href="#download">Download</a>. <strong>No compiling.</strong> Pick your platform and save it.</p>
+
+    <h3>3 · Pair the tunnel</h3>
+    <p>Run the binary as root / Administrator (it creates a TUN device — same requirement as WireGuard or Tailscale). It opens your browser; authorize as <em>your</em> ARENA user. Keys are brokered server-side — <strong>you never paste a private key</strong>.</p>
+    <pre><code># Linux / macOS
+sudo ./arena-tunnel-client-linux-amd64
+
+# → opens https://arena.adversario.cl/byoc2/connect?code=XXXXXX
+# → you authorize in the browser
+# → interface "arena-byoc" comes up (10.200.0.x) and your
+#   redirector slot is provisioned automatically.
+
+./arena-tunnel-client-linux-amd64 status   # paired + tunnel state</code></pre>
+    <p><strong>Windows:</strong> unzip and run the <code>.exe</code> as Administrator (bundles <code>wintun.dll</code>). The browser-pairing step is identical.</p>
+
+    <h3>4 · Point your own C2 at the redirector</h3>
+    <p>Stand up your team server — <a href="adaptix-setup.html">Adaptix (built from upstream source)</a>, Cobalt Strike, whatever you run. The Bring-Your-Own panel shows your <strong>redirector host</strong>, <strong>listener port</strong>, and the <strong>__arena_tenant</strong> attribution cookie. Configure your HTTP listener / malleable profile to:</p>
+    <ul>
+      <li>call back through the <strong>redirector host</strong> — never your TS directly;</li>
+      <li>emit the <code>__arena_tenant=&lt;value&gt;</code> cookie ARENA gives you — that's how your beacons get attributed to <em>you</em> and scored.</li>
+    </ul>
+
+    <h3>5 · Drop a payload &amp; play</h3>
+    <p>Generate your payload, land it on a scenario host. Beacons travel:</p>
+    <pre><code>scenario host  →  redirector  →  arena-tunnel  →  your TeamServer</code></pre>
+    <p>Your team server stays private the whole time.</p>
+
+    <h3>6 · Watch the score</h3>
+    <p>The <strong>Status</strong> page shows redirector reachability and your recent beacons. Meanwhile ARENA's OPSEC engine grades your tradecraft — noisy moves (Kerberoasting, DCSync, SharpHound sweeps, loud C2 egress) cost points. <strong>Stay quiet.</strong></p>
+  </div>
+</section>
+
+<section id="selfhost">
+  <div class="container">
+    <h2>Advanced — self-hosted / manual</h2>
+    <p>Not on ARENA, or running your own endpoint? The same binary pairs with any WireGuard server fronted by a WS-proxying CDN, using explicit flags instead of the browser flow.</p>
 
     <h3>Server (your network)</h3>
     <p>Run alongside a WireGuard server on the same host. Expose the HTTP port through Cloudflare Tunnel (or any other CDN that proxies WS).</p>
@@ -165,14 +209,14 @@ arena-tunnel-server --listen 127.0.0.1:8888 --wg 127.0.0.1:51820
 # 3. Cloudflared ingress rule
 #    wss://wg.example.com → http://127.0.0.1:8888</code></pre>
 
-    <h3>Client (anywhere on Internet)</h3>
+    <h3>Client (explicit flags)</h3>
     <pre><code># Linux / macOS — needs root for /dev/net/tun
 sudo ./arena-tunnel-client-linux-amd64 \
   -priv &lt;peer-priv-b64&gt; \
   -pub  &lt;server-pub-b64&gt; \
   -ip   10.200.0.2 \
   -host wg.example.com</code></pre>
-    <p>Or build with credentials baked in via <code>build.sh</code> for a zero-config UX.</p>
+    <p>Or bake credentials in at build time via <code>build.sh</code> for a zero-config, one-binary UX (this is how ARENA generates each student's download).</p>
   </div>
 </section>
 
