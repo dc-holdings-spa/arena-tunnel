@@ -31,9 +31,13 @@
   .sub{color:var(--dim);font-size:1.1rem;margin-top:0.4rem;max-width:700px}
   .badges{margin-top:1.4rem;display:flex;flex-wrap:wrap;gap:0.5rem}
   .badges img{height:20px}
-  .nav{margin-top:2rem;display:flex;gap:1.5rem;font-family:var(--mono);font-size:0.95rem}
+  .nav{margin-top:2rem;display:flex;gap:1.5rem;font-family:var(--mono);font-size:0.95rem;flex-wrap:wrap}
   .nav a{color:var(--dim);text-transform:uppercase;letter-spacing:0.08em}
   .nav a:hover{color:var(--accent)}
+  .lang-switch{margin-left:auto;display:flex;gap:0.5rem;align-items:center;font-family:var(--mono);font-size:0.8rem}
+  .lang-switch a{color:var(--dim);letter-spacing:0.1em}
+  .lang-switch a.active{color:var(--accent);font-weight:700}
+  .lang-switch span{color:var(--line)}
   section{padding:3.5rem 0;border-bottom:1px solid var(--line)}
   section:last-of-type{border-bottom:none}
   h2{font-family:var(--mono);font-size:1.6rem;font-weight:600;margin-bottom:1.5rem;display:flex;align-items:center;gap:0.6rem}
@@ -81,6 +85,11 @@
       <a href="#download">Download</a>
       <a href="#selfhost">Self-host</a>
       <a href="https://github.com/dc-holdings-spa/arena-tunnel">GitHub →</a>
+      <div class="lang-switch">
+        <a href="index.html" class="active">EN</a>
+        <span>|</span>
+        <a href="index.es.html">ES</a>
+      </div>
     </nav>
     <div style="margin-top:2.5rem">
       <a href="https://arena.adversario.cl" class="cta">Start on ARENA</a>
