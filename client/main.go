@@ -171,7 +171,7 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 // Routes pushed through the tunnel automatically. Covers the entire
 // scenario VLAN supernet (10.128.0.0/9) so students can reach every
 // scenario without remembering to add routes by hand. The tunnel
-// network (10.201.0.0/24) is implicit from the address assignment.
+// network (10.201.0.0/16) is implicit from the address assignment.
 var pushRoutes = []string{
 	"10.128.0.0/9",
 }
@@ -180,8 +180,10 @@ func configureTUN(ipStr string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("interface config only implemented for linux (PR welcome)")
 	}
-	// Set address
-	if err := exec.Command("ip", "addr", "add", ipStr+"/24", "dev", tunnelName).Run(); err != nil {
+	// Set address. /16 so the whole tunnel pool (10.201.0.0/16, widened from
+	// /24) is on-link — the server gateway 10.201.0.1 and any peer /32 sit in
+	// the same supernet regardless of which /24 this client's IP landed in.
+	if err := exec.Command("ip", "addr", "add", ipStr+"/16", "dev", tunnelName).Run(); err != nil {
 		return fmt.Errorf("ip addr add: %w", err)
 	}
 	// Bring up

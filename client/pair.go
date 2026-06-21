@@ -4,7 +4,7 @@
 //   1. Generate a 6-char human-friendly code (Crockford-ish alphabet,
 //      no 0/1/I/O/L confusables).
 //   2. POST  {arena}/api/byoc2/pair/init  {code, version, hostname, os, arch}
-//      → 200 {expiresAt, authorizeURL}
+//      → 200 {code, claimUrl, expiresAt} — server mints the code
 //   3. Print code + URL to stdout, try to open the URL in the user's
 //      default browser. Browser open failure is non-fatal.
 //   4. Poll GET {arena}/api/byoc2/pair/poll?code=<code> every 2s for up
@@ -84,8 +84,9 @@ func generatePairingCode(n int) (string, error) {
 }
 
 // pairInitRequest is the body POSTed to /api/byoc2/pair/init.
+// The code is NOT supplied by the client: since the v2 lifecycle the server
+// mints it and rejects any client-supplied code (CLIENT_CODE_REJECTED).
 type pairInitRequest struct {
-	Code          string `json:"code"`
 	ClientVersion string `json:"clientVersion"`
 	Hostname      string `json:"hostname"`
 	OS            string `json:"os"`
@@ -93,9 +94,11 @@ type pairInitRequest struct {
 }
 
 // pairInitResponse is the JSON returned by /api/byoc2/pair/init on 200.
+// `code` is the server-minted pairing code we poll + open the browser with.
 type pairInitResponse struct {
-	ExpiresAt    string `json:"expiresAt"`
-	AuthorizeURL string `json:"authorizeURL"`
+	Code      string `json:"code"`
+	ClaimURL  string `json:"claimUrl"`
+	ExpiresAt string `json:"expiresAt"`
 }
 
 // pairClaimedResponse is what /pair/poll returns on 200 and what
@@ -157,16 +160,12 @@ func doJSON(ctx context.Context, c *http.Client, method, urlStr, ua string, in a
 	return c.Do(req)
 }
 
-// pairInit POSTs to /api/byoc2/pair/init. It owns generation of the
-// pairing code so the caller doesn't have to.
+// pairInit POSTs to /api/byoc2/pair/init. The SERVER mints the pairing code
+// (client-supplied codes are rejected since the v2 lifecycle); we read it back
+// from the response and return it for the poll + browser steps.
 func pairInit(ctx context.Context, c *http.Client, opts pairOptions) (string, *pairInitResponse, error) {
-	code, err := generatePairingCode(6)
-	if err != nil {
-		return "", nil, err
-	}
 	hostname, _ := os.Hostname()
 	reqBody := pairInitRequest{
-		Code:          code,
 		ClientVersion: opts.ClientVer,
 		Hostname:      hostname,
 		OS:            runtime.GOOS,
@@ -192,7 +191,10 @@ func pairInit(ctx context.Context, c *http.Client, opts pairOptions) (string, *p
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", nil, fmt.Errorf("pair/init decode: %w", err)
 	}
-	return code, &out, nil
+	if out.Code == "" {
+		return "", nil, errors.New("pair/init: server did not return a pairing code")
+	}
+	return out.Code, &out, nil
 }
 
 // joinURL is a tolerant URL joiner. opts.ArenaBaseURL may or may not have
@@ -466,10 +468,18 @@ func PairAndPersist(ctx context.Context, opts pairOptions) (*Config, int, error)
 		return nil, ExitPairInitFailed, err
 	}
 
-	authURL := initRes.AuthorizeURL
+	// Prefer the server-supplied claimUrl (relative, e.g. "/byoc2/connect?code=…");
+	// otherwise build one from the base URL + the minted code. Either way the
+	// code is the server's, not a client invention.
+	authURL := ""
+	if initRes.ClaimURL != "" {
+		if base, perr := url.Parse(opts.ArenaBaseURL); perr == nil {
+			if ref, rerr := url.Parse(initRes.ClaimURL); rerr == nil {
+				authURL = base.ResolveReference(ref).String()
+			}
+		}
+	}
 	if authURL == "" {
-		// Fall back to constructing one ourselves so the user always
-		// has something to paste, even if the server forgot to send it.
 		if u, jerr := joinURL(opts.ArenaBaseURL, "/byoc2/connect"); jerr == nil {
 			authURL = u + "?code=" + url.QueryEscape(code)
 		}
