@@ -458,7 +458,9 @@ func openBrowserWSL(rawurl string) error {
 }
 
 // PairAndPersist orchestrates the full PAIR flow:
-//   init → print code + URL → openBrowser → poll → SaveConfig.
+//
+//	init → print code + URL → openBrowser → poll → SaveConfig.
+//
 // Returns the new Config (also written to disk) and a recommended exit
 // code. The exit code is only meaningful when err != nil.
 func PairAndPersist(ctx context.Context, opts pairOptions) (*Config, int, error) {
