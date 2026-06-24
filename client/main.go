@@ -99,11 +99,43 @@ func runShovel(ctx context.Context, udpConn *net.UDPConn, wsURL string) {
 	}
 }
 
+// wssReadTimeout is how long we wait for any inbound frame (data or pong)
+// before declaring the connection dead. Must be > wssKeepaliveInterval.
+const (
+	wssKeepaliveInterval = 45 * time.Second
+	wssReadTimeout       = 90 * time.Second
+)
+
 // runOneTunnel runs the bidirectional shovel until either side dies, then returns.
 func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn) {
 	defer ws.Close()
 	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Reset read deadline on every pong so the keepalive goroutine below
+	// keeps the connection alive through Cloudflare's idle-timeout window.
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
+	})
+	ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
+
+	// Keepalive: send a WebSocket ping every 45 s. Cloudflare drops idle
+	// WebSocket connections after ~100 s; 45 s leaves comfortable headroom.
+	go func() {
+		ticker := time.NewTicker(wssKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			case <-subCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// Track WG's local UDP source so we know where to deliver WSS->UDP replies.
 	var wgPeer *net.UDPAddr
@@ -138,13 +170,13 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 	go func() {
 		defer cancel()
 		for {
-			ws.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			typ, data, err := ws.ReadMessage()
 			if err != nil {
 				log.Printf("[wss] read: %v", err)
 				return
 			}
 			if typ != websocket.BinaryMessage {
+				// ping/pong/text frames — pong handler already reset deadline
 				continue
 			}
 			// Wait for WG peer to be known (it dials us with the first packet)
