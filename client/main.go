@@ -454,6 +454,32 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 		cfg = fresh
 	}
 
+	// Pre-flight: check the stored peer is still active before bringing up
+	// the tunnel. Catches the case where the peer was revoked server-side
+	// while the binary was not running (e.g. admin revoke, re-pair from
+	// another machine). Wipe config + re-pair rather than starting a
+	// zombie tunnel that silently drops all traffic.
+	if cfg.ArenaBaseURL != "" {
+		revoked, err := pingC2State(ctx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
+		if err != nil {
+			log.Printf("[preflight] status check failed (%v) — proceeding anyway", err)
+		} else if revoked {
+			log.Println("[!] stored peer has been revoked — wiping config and re-pairing.")
+			_ = WipeConfig(path)
+			fresh, exitCode, perr := PairAndPersist(ctx, pairOptions{
+				ArenaBaseURL: cfg.ArenaBaseURL,
+				ConfigPath:   path,
+				ClientVer:    version,
+				NoBrowser:    rf.noBrowser,
+			})
+			if perr != nil {
+				log.Printf("[pair] %v", perr)
+				return exitCode
+			}
+			cfg = fresh
+		}
+	}
+
 	return runConnect(ctx, rf, cfg)
 }
 
