@@ -537,6 +537,7 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 	}
 	defer teardownTUN()
 
+	log.Printf("[+] arena-byoc %s", version)
 	log.Printf("[+] WG up: tunnelIP=%s server=%s local-udp-port=%d", cfg.TunnelIP, host, localPort)
 	if cfg.UserEmail != "" {
 		log.Printf("[+] identity: %s", cfg.UserEmail)
