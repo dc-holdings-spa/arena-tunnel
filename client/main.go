@@ -817,9 +817,11 @@ func pingC2State(ctx context.Context, arena, revToken, privB64 string) (revoked 
 	if resp.StatusCode == http.StatusUnauthorized {
 		// 401 can mean token rotated — not necessarily peer revoked. Confirm
 		// via pubkey before wiping config. If pubkey check fails or returns
-		// "active"/"unknown", treat as transient — don't wipe.
+		// "active" → treat as transient token issue, don't wipe.
+		// "revoked" or "unknown" (peer deleted) → wipe + re-pair.
+		// pubErr → server unreachable, don't wipe.
 		status, pubErr := fetchPeerStatus(ctx, arena, privB64)
-		if pubErr != nil || status != "revoked" {
+		if pubErr != nil || status == "active" {
 			return false, "", nil
 		}
 		return true, "", nil
