@@ -542,7 +542,35 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
 	go runShovel(shovelCtx, udpConn, wsURL)
 
-	<-ctx.Done()
+	// Poll server every 60 s to detect server-side revocation. If the peer
+	// is revoked (admin action, re-pair replace, etc.) while the tunnel is
+	// running, shut down cleanly so the student knows to re-pair rather than
+	// sitting on a zombie tunnel that silently drops all traffic.
+	if cfg.ArenaBaseURL != "" && cfg.PrivateKey != "" {
+		go func() {
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					status, err := fetchPeerStatus(shovelCtx, cfg.ArenaBaseURL, cfg.PrivateKey)
+					if err != nil {
+						// transient — ignore, try next tick
+						continue
+					}
+					if status == "revoked" {
+						log.Println("[!] peer revoked server-side — shutting down. Run `arena-byoc pair` to re-pair.")
+						cancel()
+						return
+					}
+				case <-shovelCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	<-shovelCtx.Done()
 	log.Println("[!] shutdown requested")
 	cancel()
 	dev.Close()
