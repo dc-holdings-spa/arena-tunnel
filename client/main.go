@@ -543,23 +543,24 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
 	go runShovel(shovelCtx, udpConn, wsURL)
 
-	// Poll server every 60 s to detect server-side revocation. If the peer
-	// is revoked (admin action, re-pair replace, etc.) while the tunnel is
-	// running, shut down cleanly so the student knows to re-pair rather than
-	// sitting on a zombie tunnel that silently drops all traffic.
-	if cfg.ArenaBaseURL != "" && cfg.PrivateKey != "" {
+	// Poll /api/users/me/c2-state every 60 s with the revocationToken Bearer.
+	// Two jobs in one call:
+	//   1. Bumps Byoc2Peer.lastCliFetchAt so the dashboard shows LIVE (not OFFLINE).
+	//   2. Detects server-side revocation — if byoc2.status == "revoked", exit.
+	// Falls back to pubkey-based /peer/status when no revocationToken is stored
+	// (legacy configs from before v1.6.0).
+	if cfg.ArenaBaseURL != "" {
 		go func() {
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					status, err := fetchPeerStatus(shovelCtx, cfg.ArenaBaseURL, cfg.PrivateKey)
+					revoked, err := pingC2State(shovelCtx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
 					if err != nil {
-						// transient — ignore, try next tick
-						continue
+						continue // transient — ignore, try next tick
 					}
-					if status == "revoked" {
+					if revoked {
 						log.Println("[!] peer revoked server-side — shutting down. Run `arena-byoc pair` to re-pair.")
 						cancel()
 						return
@@ -686,6 +687,52 @@ func runStatus(ctx context.Context, rf *rootFlags) int {
 		return ExitPairInitFailed
 	}
 	return ExitOK
+}
+
+// pingC2State calls GET /api/users/me/c2-state with a Bearer revocationToken.
+// Two effects: bumps lastCliFetchAt (→ dashboard shows LIVE) and returns
+// revoked=true when the peer has been revoked server-side.
+// Falls back to fetchPeerStatus (pubkey) when no revocationToken is available.
+func pingC2State(ctx context.Context, arena, revToken, privB64 string) (revoked bool, err error) {
+	if revToken == "" {
+		// Legacy config — fall back to pubkey-based check.
+		status, e := fetchPeerStatus(ctx, arena, privB64)
+		return status == "revoked", e
+	}
+	endpoint, e := joinURL(arena, "/api/users/me/c2-state")
+	if e != nil {
+		return false, e
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, e := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	if e != nil {
+		return false, e
+	}
+	req.Header.Set("Authorization", "Bearer "+revToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent(version))
+	resp, e := newHTTPClient().Do(req)
+	if e != nil {
+		return false, e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Token revoked or expired — treat as revoked peer.
+		return true, nil
+	}
+	if resp.StatusCode >= 400 {
+		return false, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var body struct {
+		Byoc2 *struct {
+			Status string `json:"status"`
+		} `json:"byoc2"`
+	}
+	if e := json.NewDecoder(resp.Body).Decode(&body); e != nil {
+		return false, e
+	}
+	return body.Byoc2 != nil && body.Byoc2.Status == "revoked", nil
 }
 
 // fetchPeerStatus calls /api/byoc2/peer/status?pubkey=<b64> with a short
