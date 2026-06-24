@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -248,6 +249,51 @@ func teardownTUN() {
 	}
 }
 
+// ---------------- PID lock file ----------------
+
+const pidFilePath = "/tmp/arena-byoc.pid"
+
+// acquirePIDLock tries to create the PID lock file exclusively.
+// Returns true when the lock was acquired (caller must call releasePIDLock on
+// clean exit). On false the process should exit — either another instance is
+// running, or we failed to write the file.
+func acquirePIDLock() bool {
+	f, err := os.OpenFile(pidFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if !os.IsExist(err) {
+			log.Printf("[pid] could not create lock file %s: %v", pidFilePath, err)
+			return false
+		}
+		// File exists — check if that PID is still alive.
+		raw, rerr := os.ReadFile(pidFilePath)
+		if rerr != nil {
+			// Unreadable stale lock — remove and retry.
+			log.Printf("[pid] stale/unreadable lock file — removing and continuing")
+			_ = os.Remove(pidFilePath)
+			return acquirePIDLock()
+		}
+		var pid int
+		if _, serr := fmt.Sscan(string(raw), &pid); serr == nil && pid > 0 {
+			// kill(pid, 0) — signal 0 just probes existence without delivery.
+			if perr := syscall.Kill(pid, 0); perr == nil {
+				fmt.Fprintf(os.Stderr, "[!] arena-byoc is already running (pid %d). Run 'arena-byoc logout' to stop it.\n", pid)
+				return false
+			}
+		}
+		// Stale lock (dead process) — remove and retry.
+		log.Printf("[pid] stale lock file (dead process) — removing and continuing")
+		_ = os.Remove(pidFilePath)
+		return acquirePIDLock()
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%d\n", os.Getpid())
+	return true
+}
+
+func releasePIDLock() {
+	_ = os.Remove(pidFilePath)
+}
+
 // ---------------- entry point + subcommand dispatch ----------------
 
 // rootFlags holds everything parsed from the command line. We use a
@@ -368,6 +414,13 @@ func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
 
 // runDefault is the BOOTSTRAP → PAIR-if-needed → CONNECT path.
 func runDefault(ctx context.Context, rf *rootFlags) int {
+	// Enforce single-instance via PID lock file. We do this before any
+	// network activity so a second invocation fails fast with a clear message.
+	if !acquirePIDLock() {
+		return ExitFatalRuntime
+	}
+	defer releasePIDLock()
+
 	// 1. Legacy headless overrides win — never read or write the config file.
 	if rf.priv != "" || rf.pub != "" || rf.ip != "" || rf.host != "" {
 		return runConnect(ctx, rf, &Config{
@@ -460,23 +513,28 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 	// another machine). Wipe config + re-pair rather than starting a
 	// zombie tunnel that silently drops all traffic.
 	if cfg.ArenaBaseURL != "" {
-		revoked, err := pingC2State(ctx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
+		revoked, latestVer, err := pingC2State(ctx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
 		if err != nil {
 			log.Printf("[preflight] status check failed (%v) — proceeding anyway", err)
-		} else if revoked {
-			log.Println("[!] stored peer has been revoked — wiping config and re-pairing.")
-			_ = WipeConfig(path)
-			fresh, exitCode, perr := PairAndPersist(ctx, pairOptions{
-				ArenaBaseURL: cfg.ArenaBaseURL,
-				ConfigPath:   path,
-				ClientVer:    version,
-				NoBrowser:    rf.noBrowser,
-			})
-			if perr != nil {
-				log.Printf("[pair] %v", perr)
-				return exitCode
+		} else {
+			if latestVer != "" && latestVer != version {
+				log.Printf("[!] update available: %s → %s. Download from Weapons tab.", version, latestVer)
 			}
-			cfg = fresh
+			if revoked {
+				log.Println("[!] stored peer has been revoked — wiping config and re-pairing.")
+				_ = WipeConfig(path)
+				fresh, exitCode, perr := PairAndPersist(ctx, pairOptions{
+					ArenaBaseURL: cfg.ArenaBaseURL,
+					ConfigPath:   path,
+					ClientVer:    version,
+					NoBrowser:    rf.noBrowser,
+				})
+				if perr != nil {
+					log.Printf("[pair] %v", perr)
+					return exitCode
+				}
+				cfg = fresh
+			}
 		}
 	}
 
@@ -577,18 +635,25 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 	// Two jobs in one call:
 	//   1. Bumps Byoc2Peer.lastCliFetchAt so the dashboard shows LIVE (not OFFLINE).
 	//   2. Detects server-side revocation — if byoc2.status == "revoked", exit.
+	//   3. Emits a one-time update nudge when latestBinaryVersion > version.
 	// Falls back to pubkey-based /peer/status when no revocationToken is stored
 	// (legacy configs from before v1.6.0).
 	if cfg.ArenaBaseURL != "" {
 		go func() {
+			var verNudgeOnce sync.Once
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					revoked, err := pingC2State(shovelCtx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
+					revoked, latestVer, err := pingC2State(shovelCtx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
 					if err != nil {
 						continue // transient — ignore, try next tick
+					}
+					if latestVer != "" && latestVer != version {
+						verNudgeOnce.Do(func() {
+							log.Printf("[!] update available: %s → %s. Download from Weapons tab.", version, latestVer)
+						})
 					}
 					if revoked {
 						log.Println("[!] peer revoked server-side — shutting down. Run `arena-byoc pair` to re-pair.")
@@ -723,46 +788,58 @@ func runStatus(ctx context.Context, rf *rootFlags) int {
 // Two effects: bumps lastCliFetchAt (→ dashboard shows LIVE) and returns
 // revoked=true when the peer has been revoked server-side.
 // Falls back to fetchPeerStatus (pubkey) when no revocationToken is available.
-func pingC2State(ctx context.Context, arena, revToken, privB64 string) (revoked bool, err error) {
+//
+// On 401: the token may have been rotated (not the peer revoked). We verify
+// via the pubkey fallback before deciding. Only return revoked=true when
+// fetchPeerStatus also confirms "revoked"; any other outcome is treated as
+// a transient token issue — return revoked=false so we don't wipe config.
+func pingC2State(ctx context.Context, arena, revToken, privB64 string) (revoked bool, latestVer string, err error) {
 	if revToken == "" {
 		// Legacy config — fall back to pubkey-based check.
 		status, e := fetchPeerStatus(ctx, arena, privB64)
-		return status == "revoked", e
+		return status == "revoked", "", e
 	}
 	endpoint, e := joinURL(arena, "/api/users/me/c2-state")
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, e := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	req.Header.Set("Authorization", "Bearer "+revToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent(version))
 	resp, e := newHTTPClient().Do(req)
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
-		// Token revoked or expired — treat as revoked peer.
-		return true, nil
+		// 401 can mean token rotated — not necessarily peer revoked. Confirm
+		// via pubkey before wiping config. If pubkey check fails or returns
+		// "active"/"unknown", treat as transient — don't wipe.
+		status, pubErr := fetchPeerStatus(ctx, arena, privB64)
+		if pubErr != nil || status != "revoked" {
+			return false, "", nil
+		}
+		return true, "", nil
 	}
 	if resp.StatusCode >= 400 {
-		return false, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return false, "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var body struct {
 		Byoc2 *struct {
 			Status string `json:"status"`
 		} `json:"byoc2"`
+		LatestBinaryVersion string `json:"latestBinaryVersion,omitempty"`
 	}
 	if e := json.NewDecoder(resp.Body).Decode(&body); e != nil {
-		return false, e
+		return false, "", e
 	}
-	return body.Byoc2 != nil && body.Byoc2.Status == "revoked", nil
+	return body.Byoc2 != nil && body.Byoc2.Status == "revoked", body.LatestBinaryVersion, nil
 }
 
 // fetchPeerStatus calls /api/byoc2/peer/status?pubkey=<b64> with a short
