@@ -250,8 +250,8 @@ func teardownTUN() {
 }
 
 // ---------------- PID lock file ----------------
-
-const pidFilePath = "/tmp/arena-byoc.pid"
+// pidFilePath is declared in pid_unix.go / pid_windows.go (platform-specific).
+// processExists(pid) is also platform-specific.
 
 // acquirePIDLock tries to create the PID lock file exclusively.
 // Returns true when the lock was acquired (caller must call releasePIDLock on
@@ -267,20 +267,17 @@ func acquirePIDLock() bool {
 		// File exists — check if that PID is still alive.
 		raw, rerr := os.ReadFile(pidFilePath)
 		if rerr != nil {
-			// Unreadable stale lock — remove and retry.
 			log.Printf("[pid] stale/unreadable lock file — removing and continuing")
 			_ = os.Remove(pidFilePath)
 			return acquirePIDLock()
 		}
 		var pid int
 		if _, serr := fmt.Sscan(string(raw), &pid); serr == nil && pid > 0 {
-			// kill(pid, 0) — signal 0 just probes existence without delivery.
-			if perr := syscall.Kill(pid, 0); perr == nil {
+			if processExists(pid) {
 				fmt.Fprintf(os.Stderr, "[!] arena-byoc is already running (pid %d). Run 'arena-byoc logout' to stop it.\n", pid)
 				return false
 			}
 		}
-		// Stale lock (dead process) — remove and retry.
 		log.Printf("[pid] stale lock file (dead process) — removing and continuing")
 		_ = os.Remove(pidFilePath)
 		return acquirePIDLock()
