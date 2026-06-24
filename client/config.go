@@ -29,15 +29,16 @@ const ConfigSchemaVersion = 1
 
 // Config is the persisted pairing state.
 type Config struct {
-	Version      int    `json:"version"`
-	TunnelIP     string `json:"tunnelIp"`
-	PrivateKey   string `json:"privateKey"`
-	ServerPubKey string `json:"serverPubKey"`
-	ServerHost   string `json:"serverHost"`
-	UserEmail    string `json:"userEmail"`
-	PairedAt     string `json:"pairedAt"`
-	ArenaBaseURL string `json:"arenaBaseURL,omitempty"`
-	DeviceID     string `json:"deviceId,omitempty"`
+	Version         int    `json:"version"`
+	TunnelIP        string `json:"tunnelIp"`
+	PrivateKey      string `json:"privateKey"`
+	ServerPubKey    string `json:"serverPubKey"`
+	ServerHost      string `json:"serverHost"`
+	UserEmail       string `json:"userEmail"`
+	PairedAt        string `json:"pairedAt"`
+	ArenaBaseURL    string `json:"arenaBaseURL,omitempty"`
+	DeviceID        string `json:"deviceId,omitempty"`
+	RevocationToken string `json:"revocationToken,omitempty"`
 }
 
 // Complete reports whether Config carries the minimum fields required to

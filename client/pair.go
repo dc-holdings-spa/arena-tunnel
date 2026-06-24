@@ -104,12 +104,13 @@ type pairInitResponse struct {
 // pairClaimedResponse is what /pair/poll returns on 200 and what
 // /pair/claim returns on the headless path.
 type pairClaimedResponse struct {
-	TunnelIP     string `json:"tunnelIp"`
-	PrivateKey   string `json:"privateKey"`
-	ServerPubKey string `json:"serverPubKey"`
-	ServerHost   string `json:"serverHost"`
-	UserEmail    string `json:"userEmail"`
-	DeviceID     string `json:"deviceId,omitempty"`
+	TunnelIP        string `json:"tunnelIp"`
+	PrivateKey      string `json:"privateKey"`
+	ServerPubKey    string `json:"serverPubKey"`
+	ServerHost      string `json:"serverHost"`
+	UserEmail       string `json:"userEmail"`
+	DeviceID        string `json:"deviceId,omitempty"`
+	RevocationToken string `json:"revocationToken,omitempty"`
 }
 
 // pairOptions packages everything pair flow callers may want to tweak.
@@ -510,15 +511,16 @@ func PairAndPersist(ctx context.Context, opts pairOptions) (*Config, int, error)
 	}
 
 	cfg := &Config{
-		Version:      ConfigSchemaVersion,
-		TunnelIP:     claimed.TunnelIP,
-		PrivateKey:   claimed.PrivateKey,
-		ServerPubKey: claimed.ServerPubKey,
-		ServerHost:   claimed.ServerHost,
-		UserEmail:    claimed.UserEmail,
-		PairedAt:     time.Now().UTC().Format(time.RFC3339),
-		ArenaBaseURL: opts.ArenaBaseURL,
-		DeviceID:     claimed.DeviceID,
+		Version:         ConfigSchemaVersion,
+		TunnelIP:        claimed.TunnelIP,
+		PrivateKey:      claimed.PrivateKey,
+		ServerPubKey:    claimed.ServerPubKey,
+		ServerHost:      claimed.ServerHost,
+		UserEmail:       claimed.UserEmail,
+		PairedAt:        time.Now().UTC().Format(time.RFC3339),
+		ArenaBaseURL:    opts.ArenaBaseURL,
+		DeviceID:        claimed.DeviceID,
+		RevocationToken: claimed.RevocationToken,
 	}
 
 	if err := SaveConfig(opts.ConfigPath, cfg); err != nil {
