@@ -297,7 +297,10 @@ func parseArgs() *rootFlags {
 	args := os.Args[1:]
 	if len(args) > 0 && !isFlagLike(args[0]) {
 		switch args[0] {
-		case "logout", "status", "pair", "version", "help":
+		case "logout", "revoke", "status", "pair", "version", "help":
+			if args[0] == "revoke" {
+				args[0] = "logout" // alias
+			}
 			rf.subcommand = args[0]
 			args = args[1:]
 		case "--help", "-h":
@@ -331,6 +334,7 @@ Usage:
   arena-byoc [flags]              Pair if needed, then run tunnel.
   arena-byoc pair [--force]       Force the browser-pairing flow.
   arena-byoc logout [--keep-server]
+  arena-byoc revoke [--keep-server]
                                   Wipe local config; revoke peer server-side.
   arena-byoc status               Show stored identity + ping arena.
   arena-byoc version              Print build version.
