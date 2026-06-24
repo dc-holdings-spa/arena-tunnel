@@ -160,7 +160,11 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 			}
 			ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-				log.Printf("[wss] write: %v", err)
+				// Suppress noise when the connection was closed intentionally
+				// (e.g. Cloudflare 300s hard-reset → reconnect in progress).
+				if subCtx.Err() == nil {
+					log.Printf("[wss] write: %v", err)
+				}
 				return
 			}
 		}
