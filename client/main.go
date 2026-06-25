@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -112,22 +113,30 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Reset read deadline on every pong so the keepalive goroutine below
-	// keeps the connection alive through Cloudflare's idle-timeout window.
+	// The server sends pings every 30 s; we must respond with pong (gorilla
+	// does this automatically) AND reset our own read deadline so we don't
+	// time out while the server is silently healthy.
+	ws.SetPingHandler(func(data string) error {
+		_ = ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
+		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return ws.WriteMessage(websocket.PongMessage, []byte(data))
+	})
+	// Also reset on pong in case both sides happen to ping simultaneously.
 	ws.SetPongHandler(func(string) error {
 		return ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
 	})
 	ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
 
-	// Keepalive: send a WebSocket ping every 45 s. Cloudflare drops idle
-	// WebSocket connections after ~100 s; 45 s leaves comfortable headroom.
+	// Client-side keepalive: belt-and-suspenders ping in case the server's
+	// ping goroutine is behind (e.g. just started, or load spike). Also keeps
+	// Cloudflare's 100 s idle-connection killer at bay on the edge hop.
 	go func() {
 		ticker := time.NewTicker(wssKeepaliveInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
@@ -246,6 +255,48 @@ func teardownTUN() {
 		exec.Command("ip", "link", "set", tunnelName, "down").Run()
 		exec.Command("ip", "addr", "flush", "dev", tunnelName).Run()
 	}
+}
+
+// ---------------- PID lock file ----------------
+// pidFilePath is declared in pid_unix.go / pid_windows.go (platform-specific).
+// processExists(pid) is also platform-specific.
+
+// acquirePIDLock tries to create the PID lock file exclusively.
+// Returns true when the lock was acquired (caller must call releasePIDLock on
+// clean exit). On false the process should exit — either another instance is
+// running, or we failed to write the file.
+func acquirePIDLock() bool {
+	f, err := os.OpenFile(pidFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if !os.IsExist(err) {
+			log.Printf("[pid] could not create lock file %s: %v", pidFilePath, err)
+			return false
+		}
+		// File exists — check if that PID is still alive.
+		raw, rerr := os.ReadFile(pidFilePath)
+		if rerr != nil {
+			log.Printf("[pid] stale/unreadable lock file — removing and continuing")
+			_ = os.Remove(pidFilePath)
+			return acquirePIDLock()
+		}
+		var pid int
+		if _, serr := fmt.Sscan(string(raw), &pid); serr == nil && pid > 0 {
+			if processExists(pid) {
+				fmt.Fprintf(os.Stderr, "[!] arena-byoc is already running (pid %d). Run 'arena-byoc logout' to stop it.\n", pid)
+				return false
+			}
+		}
+		log.Printf("[pid] stale lock file (dead process) — removing and continuing")
+		_ = os.Remove(pidFilePath)
+		return acquirePIDLock()
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%d\n", os.Getpid())
+	return true
+}
+
+func releasePIDLock() {
+	_ = os.Remove(pidFilePath)
 }
 
 // ---------------- entry point + subcommand dispatch ----------------
@@ -368,6 +419,13 @@ func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
 
 // runDefault is the BOOTSTRAP → PAIR-if-needed → CONNECT path.
 func runDefault(ctx context.Context, rf *rootFlags) int {
+	// Enforce single-instance via PID lock file. We do this before any
+	// network activity so a second invocation fails fast with a clear message.
+	if !acquirePIDLock() {
+		return ExitFatalRuntime
+	}
+	defer releasePIDLock()
+
 	// 1. Legacy headless overrides win — never read or write the config file.
 	if rf.priv != "" || rf.pub != "" || rf.ip != "" || rf.host != "" {
 		return runConnect(ctx, rf, &Config{
@@ -460,23 +518,28 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 	// another machine). Wipe config + re-pair rather than starting a
 	// zombie tunnel that silently drops all traffic.
 	if cfg.ArenaBaseURL != "" {
-		revoked, err := pingC2State(ctx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
+		revoked, latestVer, err := pingC2State(ctx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
 		if err != nil {
 			log.Printf("[preflight] status check failed (%v) — proceeding anyway", err)
-		} else if revoked {
-			log.Println("[!] stored peer has been revoked — wiping config and re-pairing.")
-			_ = WipeConfig(path)
-			fresh, exitCode, perr := PairAndPersist(ctx, pairOptions{
-				ArenaBaseURL: cfg.ArenaBaseURL,
-				ConfigPath:   path,
-				ClientVer:    version,
-				NoBrowser:    rf.noBrowser,
-			})
-			if perr != nil {
-				log.Printf("[pair] %v", perr)
-				return exitCode
+		} else {
+			if latestVer != "" && latestVer != version {
+				log.Printf("[!] update available: %s → %s. Download from Weapons tab.", version, latestVer)
 			}
-			cfg = fresh
+			if revoked {
+				log.Println("[!] stored peer has been revoked — wiping config and re-pairing.")
+				_ = WipeConfig(path)
+				fresh, exitCode, perr := PairAndPersist(ctx, pairOptions{
+					ArenaBaseURL: cfg.ArenaBaseURL,
+					ConfigPath:   path,
+					ClientVer:    version,
+					NoBrowser:    rf.noBrowser,
+				})
+				if perr != nil {
+					log.Printf("[pair] %v", perr)
+					return exitCode
+				}
+				cfg = fresh
+			}
 		}
 	}
 
@@ -577,18 +640,25 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 	// Two jobs in one call:
 	//   1. Bumps Byoc2Peer.lastCliFetchAt so the dashboard shows LIVE (not OFFLINE).
 	//   2. Detects server-side revocation — if byoc2.status == "revoked", exit.
+	//   3. Emits a one-time update nudge when latestBinaryVersion > version.
 	// Falls back to pubkey-based /peer/status when no revocationToken is stored
 	// (legacy configs from before v1.6.0).
 	if cfg.ArenaBaseURL != "" {
 		go func() {
+			var verNudgeOnce sync.Once
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					revoked, err := pingC2State(shovelCtx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
+					revoked, latestVer, err := pingC2State(shovelCtx, cfg.ArenaBaseURL, cfg.RevocationToken, cfg.PrivateKey)
 					if err != nil {
 						continue // transient — ignore, try next tick
+					}
+					if latestVer != "" && latestVer != version {
+						verNudgeOnce.Do(func() {
+							log.Printf("[!] update available: %s → %s. Download from Weapons tab.", version, latestVer)
+						})
 					}
 					if revoked {
 						log.Println("[!] peer revoked server-side — shutting down. Run `arena-byoc pair` to re-pair.")
@@ -723,46 +793,60 @@ func runStatus(ctx context.Context, rf *rootFlags) int {
 // Two effects: bumps lastCliFetchAt (→ dashboard shows LIVE) and returns
 // revoked=true when the peer has been revoked server-side.
 // Falls back to fetchPeerStatus (pubkey) when no revocationToken is available.
-func pingC2State(ctx context.Context, arena, revToken, privB64 string) (revoked bool, err error) {
+//
+// On 401: the token may have been rotated (not the peer revoked). We verify
+// via the pubkey fallback before deciding. Only return revoked=true when
+// fetchPeerStatus also confirms "revoked"; any other outcome is treated as
+// a transient token issue — return revoked=false so we don't wipe config.
+func pingC2State(ctx context.Context, arena, revToken, privB64 string) (revoked bool, latestVer string, err error) {
 	if revToken == "" {
 		// Legacy config — fall back to pubkey-based check.
 		status, e := fetchPeerStatus(ctx, arena, privB64)
-		return status == "revoked", e
+		return status == "revoked", "", e
 	}
 	endpoint, e := joinURL(arena, "/api/users/me/c2-state")
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, e := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	req.Header.Set("Authorization", "Bearer "+revToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent(version))
 	resp, e := newHTTPClient().Do(req)
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
-		// Token revoked or expired — treat as revoked peer.
-		return true, nil
+		// 401 can mean token rotated — not necessarily peer revoked. Confirm
+		// via pubkey before wiping config. If pubkey check fails or returns
+		// "active" → treat as transient token issue, don't wipe.
+		// "revoked" or "unknown" (peer deleted) → wipe + re-pair.
+		// pubErr → server unreachable, don't wipe.
+		status, pubErr := fetchPeerStatus(ctx, arena, privB64)
+		if pubErr != nil || status == "active" {
+			return false, "", nil
+		}
+		return true, "", nil
 	}
 	if resp.StatusCode >= 400 {
-		return false, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return false, "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var body struct {
 		Byoc2 *struct {
 			Status string `json:"status"`
 		} `json:"byoc2"`
+		LatestBinaryVersion string `json:"latestBinaryVersion,omitempty"`
 	}
 	if e := json.NewDecoder(resp.Body).Decode(&body); e != nil {
-		return false, e
+		return false, "", e
 	}
-	return body.Byoc2 != nil && body.Byoc2.Status == "revoked", nil
+	return body.Byoc2 != nil && body.Byoc2.Status == "revoked", body.LatestBinaryVersion, nil
 }
 
 // fetchPeerStatus calls /api/byoc2/peer/status?pubkey=<b64> with a short
