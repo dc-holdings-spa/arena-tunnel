@@ -35,8 +35,8 @@ import (
 )
 
 var (
-	listenAddr  = flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
-	wgTarget    = flag.String("wg", "127.0.0.1:51820", "WireGuard server UDP target")
+	listenAddr   = flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
+	wgTarget     = flag.String("wg", "127.0.0.1:51820", "WireGuard server UDP target")
 	pingInterval = flag.Duration("ping-interval", 30*time.Second, "server→client WebSocket ping interval")
 	pongTimeout  = flag.Duration("pong-timeout", 90*time.Second, "WebSocket close if pong not received within N")
 	udpIdleLog   = flag.Duration("udp-idle-log", 5*time.Minute, "log a warning after N idle (no WG traffic); tunnel stays up")
@@ -53,12 +53,12 @@ var upgrader = websocket.Upgrader{
 }
 
 type tunnel struct {
-	ws        *websocket.Conn
-	udp       *net.UDPConn
-	clientIP  string
-	openedAt  time.Time
-	once      sync.Once
-	done      chan struct{}
+	ws       *websocket.Conn
+	udp      *net.UDPConn
+	clientIP string
+	openedAt time.Time
+	once     sync.Once
+	done     chan struct{}
 
 	// stats — updated atomically, read by /healthz handler.
 	bytesWGIn  atomic.Int64 // client→WG (WS→UDP direction)
