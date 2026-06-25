@@ -275,9 +275,17 @@ func pairPoll(ctx context.Context, c *http.Client, opts pairOptions, code string
 			}
 			return &out, ExitOK, nil
 
-		case http.StatusAccepted: // 202 — pending
+		case http.StatusAccepted: // 202 — pending or saga provisioning
+			var body struct {
+				Status string `json:"status"`
+				Reason string `json:"reason"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&body)
 			resp.Body.Close()
 			netFailures = 0
+			if body.Reason == "saga_running" {
+				fmt.Printf("\r  ⏳ Provisioning WireGuard peer (can take ~30s) …                    ")
+			}
 			if !sleepCtx(ctx, pollIntervalDefault) {
 				return nil, ExitSignal, ctx.Err()
 			}
