@@ -632,6 +632,8 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		log.Printf("[+] identity: %s", cfg.UserEmail)
 	}
 
+	printC2Banner(ctx, cfg)
+
 	shovelCtx, cancel := context.WithCancel(ctx)
 	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
 	go runShovel(shovelCtx, udpConn, wsURL)
