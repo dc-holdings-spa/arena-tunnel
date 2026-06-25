@@ -6,8 +6,9 @@ We support the latest minor release. Older releases get critical-only patches fo
 
 | Version    | Supported |
 |------------|-----------|
-| `v0.1.x`   | ✅ active |
-| `< v0.1`   | ❌        |
+| `v1.1.x`   | ✅ active |
+| `v1.0.x`   | ✅ critical patches only |
+| `< v1.0`   | ❌        |
 
 ## Reporting a Vulnerability
 

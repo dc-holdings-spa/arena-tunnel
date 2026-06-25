@@ -13,7 +13,7 @@ Thanks for considering a contribution. The project is small (~600 LOC of Go), th
 
 - New dependencies. We're under 5 direct deps and intend to stay that way.
 - Multi-protocol support (smtp-over-ws, dns-over-ws, etc). Use [chisel](https://github.com/jpillora/chisel) instead.
-- Config files / TOML / YAML. The product surface is flags + `-ldflags`; that's enough.
+- Config files / TOML / YAML. The product surface is flags + `-ldflags` + the pairing flow; that's enough.
 - A built-in control plane. We ship one example (Adversario Arena) — others should fork or build their own.
 - Performance "optimizations" that add complexity for < 10% wins.
 
@@ -29,8 +29,11 @@ make build
 # Run server
 ./dist/arena-tunnel-server-linux-amd64 --listen 127.0.0.1:8888 --wg 127.0.0.1:51820 &
 
-# Run client (you need a working local WG server to bridge to)
+# Run client — headless flags (need a local WG server to bridge to)
 sudo ./dist/arena-tunnel-client-linux-amd64 -priv <priv> -pub <pub> -ip 10.200.0.2 -host localhost
+
+# Or against a real Arena instance (browser pairing flow):
+sudo ./dist/arena-tunnel-client-linux-amd64 pair
 
 # Lint
 make lint
@@ -59,10 +62,12 @@ make fmt
 Maintainers only:
 
 ```bash
-make release VERSION=v0.2.0
+# Update CHANGELOG.md [Unreleased] → [vX.Y.Z], commit, then:
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-Pushes a tag → CI builds for 5 platforms → GitHub Release is auto-created with checksums and binaries attached.
+Pushing a `v*` tag triggers the release workflow → builds 5 platforms → GitHub Release with checksums and binaries. After the release publishes, update `byoc2_latest_binary_version` in ArenaSettings so existing clients see the update nudge.
 
 ## Code of Conduct
 
