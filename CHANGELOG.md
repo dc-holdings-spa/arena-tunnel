@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [v1.1.0] — 2026-06-25
+
+### Added
+
+- **Connection banner**: after the WireGuard tunnel comes up, `arena-byoc` fetches
+  `/api/users/me/c2-state` (using the stored revocation token) and prints a
+  formatted box with tunnel IP, edge IP, listener bind IP + port, SNI cover domain,
+  and HMAC attribution cookie name + value — the same data shown in the Weapons tab,
+  right in the terminal. Non-fatal: silently skipped when the slot is not yet
+  provisioned or the server is unreachable.
+
 ## [v0.1.0] — 2026-06-04
 
 ### Added
