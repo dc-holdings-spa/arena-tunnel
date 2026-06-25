@@ -12,8 +12,8 @@ import (
 // c2StateSlotView mirrors the relevant subset of Byoc2C2View returned by
 // GET /api/users/me/c2-state. Only fields we display are declared.
 type c2StateSlotView struct {
-	TunnelIp    string `json:"tunnelIp"`
-	CoverDomain string `json:"coverDomain"`
+	TunnelIp        string `json:"tunnelIp"`
+	CoverDomain     string `json:"coverDomain"`
 	RedirectorSlots []struct {
 		IpAddress *string `json:"ipAddress"`
 		SniHost   string  `json:"sniHost"`
