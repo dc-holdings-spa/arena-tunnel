@@ -113,22 +113,30 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Reset read deadline on every pong so the keepalive goroutine below
-	// keeps the connection alive through Cloudflare's idle-timeout window.
+	// The server sends pings every 30 s; we must respond with pong (gorilla
+	// does this automatically) AND reset our own read deadline so we don't
+	// time out while the server is silently healthy.
+	ws.SetPingHandler(func(data string) error {
+		_ = ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
+		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return ws.WriteMessage(websocket.PongMessage, []byte(data))
+	})
+	// Also reset on pong in case both sides happen to ping simultaneously.
 	ws.SetPongHandler(func(string) error {
 		return ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
 	})
 	ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
 
-	// Keepalive: send a WebSocket ping every 45 s. Cloudflare drops idle
-	// WebSocket connections after ~100 s; 45 s leaves comfortable headroom.
+	// Client-side keepalive: belt-and-suspenders ping in case the server's
+	// ping goroutine is behind (e.g. just started, or load spike). Also keeps
+	// Cloudflare's 100 s idle-connection killer at bay on the edge hop.
 	go func() {
 		ticker := time.NewTicker(wssKeepaliveInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
