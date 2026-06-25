@@ -75,12 +75,16 @@ func b64ToHex(b64 string) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-func runShovel(ctx context.Context, udpConn *net.UDPConn, wsURL string) {
+func runShovel(ctx context.Context, udpConn *net.UDPConn, wsURL string, arenaToken string) {
+	var wsHeaders http.Header
+	if arenaToken != "" {
+		wsHeaders = http.Header{"X-Arena-Token": {arenaToken}}
+	}
 	for ctx.Err() == nil {
 		dialer := websocket.DefaultDialer
 		dialer.HandshakeTimeout = 15 * time.Second
 		log.Printf("[wss] dialing %s", wsURL)
-		ws, resp, err := dialer.Dial(wsURL, nil)
+		ws, resp, err := dialer.Dial(wsURL, wsHeaders)
 		if err != nil {
 			status := 0
 			if resp != nil {
@@ -636,7 +640,7 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 
 	shovelCtx, cancel := context.WithCancel(ctx)
 	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
-	go runShovel(shovelCtx, udpConn, wsURL)
+	go runShovel(shovelCtx, udpConn, wsURL, cfg.RevocationToken)
 
 	// Poll /api/users/me/c2-state every 60 s with the revocationToken Bearer.
 	// Two jobs in one call:

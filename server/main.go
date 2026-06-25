@@ -22,6 +22,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -41,10 +44,40 @@ var (
 	pongTimeout  = flag.Duration("pong-timeout", 90*time.Second, "WebSocket close if pong not received within N")
 	udpIdleLog   = flag.Duration("udp-idle-log", 5*time.Minute, "log a warning after N idle (no WG traffic); tunnel stays up")
 	maxAge       = flag.Duration("max-age", 24*time.Hour, "hard cap on tunnel lifetime regardless of health")
+	managerURL   = flag.String("manager-url", "", "arena-manager peer-event URL (optional, e.g. http://localhost:3000/api/internal/byoc2/peer-event)")
 )
 
 // activeConns tracks open tunnel count for /healthz.
 var activeConns atomic.Int64
+
+var peerEventClient = &http.Client{Timeout: 5 * time.Second}
+
+// notifyManager fires a peer-event callback to arena-manager. Fire-and-forget:
+// a failed callback is logged but never blocks or kills the tunnel.
+func notifyManager(event, arenaToken string) {
+	if *managerURL == "" || arenaToken == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"token": arenaToken, "event": event})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, *managerURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[peer-event] build request failed: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := peerEventClient.Do(req)
+	if err != nil {
+		log.Printf("[peer-event] %s callback failed: %v", event, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[peer-event] %s callback returned %d", event, resp.StatusCode)
+	}
+}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -53,25 +86,27 @@ var upgrader = websocket.Upgrader{
 }
 
 type tunnel struct {
-	ws       *websocket.Conn
-	udp      *net.UDPConn
-	clientIP string
-	openedAt time.Time
-	once     sync.Once
-	done     chan struct{}
+	ws         *websocket.Conn
+	udp        *net.UDPConn
+	clientIP   string
+	arenaToken string // from X-Arena-Token header; empty when not supplied
+	openedAt   time.Time
+	once       sync.Once
+	done       chan struct{}
 
 	// stats — updated atomically, read by /healthz handler.
 	bytesWGIn  atomic.Int64 // client→WG (WS→UDP direction)
 	bytesWGOut atomic.Int64 // WG→client (UDP→WS direction)
 }
 
-func newTunnel(ws *websocket.Conn, udp *net.UDPConn, clientIP string) *tunnel {
+func newTunnel(ws *websocket.Conn, udp *net.UDPConn, clientIP, arenaToken string) *tunnel {
 	return &tunnel{
-		ws:       ws,
-		udp:      udp,
-		clientIP: clientIP,
-		openedAt: time.Now(),
-		done:     make(chan struct{}),
+		ws:         ws,
+		udp:        udp,
+		clientIP:   clientIP,
+		arenaToken: arenaToken,
+		openedAt:   time.Now(),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -87,6 +122,7 @@ func (t *tunnel) close() {
 			t.bytesWGIn.Load(),
 			t.bytesWGOut.Load(),
 		)
+		go notifyManager("disconnected", t.arenaToken)
 	})
 }
 
@@ -233,10 +269,12 @@ func handleTunnel(w http.ResponseWriter, r *http.Request) {
 	if clientIP == "" {
 		clientIP = r.RemoteAddr
 	}
+	arenaToken := r.Header.Get("X-Arena-Token")
 
-	t := newTunnel(ws, udp, clientIP)
+	t := newTunnel(ws, udp, clientIP, arenaToken)
 	activeConns.Add(1)
-	log.Printf("[+] tunnel open client=%s wg=%s", clientIP, wgAddr)
+	log.Printf("[+] tunnel open client=%s wg=%s token=%v", clientIP, wgAddr, arenaToken != "")
+	go notifyManager("connected", arenaToken)
 
 	go t.pingLoop()
 	go t.wsToUDP()
