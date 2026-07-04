@@ -94,7 +94,7 @@
     <div style="margin-top:2.5rem">
       <a href="https://arena.adversario.cl" class="cta">Start on ARENA</a>
       <a href="#quickstart" class="cta secondary">Walkthrough</a>
-      <a href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest" class="cta secondary">Download v0.1.0</a>
+      <a href="https://github.com/dc-holdings-spa/arena-tunnel/releases/latest" class="cta secondary">Download Latest</a>
     </div>
   </div>
 </header>
@@ -113,7 +113,7 @@
     <h2>How it works</h2>
     <pre class="ascii">   Client side                      Public CDN                         Server side
 ─────────────────────         ────────────────────────         ──────────────────────────
-arena-tunnel-client                                            arena-tunnel-server
+arena-byoc                                                     arena-tunnel-server
    ├─ wireguard-go (TUN)                                            ↑
    └─ WSS dialer ──► wss://your-host/... ──► cloudflared ──►        │  WS upgrade
                           (free tier)                               ▼
@@ -161,22 +161,30 @@ arena-tunnel-client                                            arena-tunnel-serv
     <p>You bring your own C2. ARENA lends you a <strong>redirector</strong> and this <strong>tunnel</strong> so your team server never touches the public internet — the scenario only ever sees the redirector. Here is the whole path, account → first beacon.</p>
 
     <h3>1 · Log in to ARENA</h3>
-    <p>Sign in at <a href="https://arena.adversario.cl">arena.adversario.cl</a> with your issued account. Open <strong>Arsenal → Bring Your Own C2</strong>.</p>
+    <p>Sign in at <a href="https://arena.adversario.cl">arena.adversario.cl</a> with your issued account. Open the <strong>Weapons</strong> tab.</p>
 
     <h3>2 · Download your client</h3>
-    <p>The Bring-Your-Own panel hands you a per-OS download — the same single binary listed under <a href="#download">Download</a>. <strong>No compiling.</strong> Pick your platform and save it.</p>
+    <p>The Weapons tab hands you a per-OS download — the same single binary listed under <a href="#download">Download</a>. <strong>No compiling.</strong> Pick your platform and save it.</p>
 
     <h3>3 · Pair the tunnel</h3>
     <p>Run the binary as root / Administrator (it creates a TUN device — same requirement as WireGuard or Tailscale). It opens your browser; authorize as <em>your</em> ARENA user. Keys are brokered server-side — <strong>you never paste a private key</strong>.</p>
-    <pre><code># Linux / macOS
-sudo ./arena-tunnel-client-linux-amd64
+    <pre><code># Linux / macOS — rename to arena-byoc for a cleaner shell experience
+chmod +x arena-tunnel-client-linux-amd64
+sudo mv arena-tunnel-client-linux-amd64 /usr/local/bin/arena-byoc
+
+# Run once — pairs on first launch, then brings up the tunnel
+sudo arena-byoc
 
 # → opens https://arena.adversario.cl/byoc2/connect?code=XXXXXX
-# → you authorize in the browser
-# → interface "arena-byoc" comes up (10.200.0.x) and your
-#   redirector slot is provisioned automatically.
+# → authorize in the browser
+# → interface "arena-byoc" comes up (10.201.x.x)
+# → route 10.128.0.0/9 (all scenario VMs) installed automatically
+# → connection banner prints: tunnel IP · edge IP · listener · SNI · attribution cookie
 
-./arena-tunnel-client-linux-amd64 status   # paired + tunnel state</code></pre>
+arena-byoc status              # show identity + tunnel state
+sudo arena-byoc logout         # stop tunnel + revoke device server-side
+sudo arena-byoc pair --force   # force re-pair (new device or revoked peer)</code></pre>
+    <p><strong>SSH / no browser?</strong> Add <code>--no-browser</code> — the code and URL are printed to stdout, open the URL on any device that has a browser.</p>
     <p><strong>Windows:</strong> unzip and run the <code>.exe</code> as Administrator (bundles <code>wintun.dll</code>). The browser-pairing step is identical.</p>
 
     <h3>4 · Point your own C2 at the redirector</h3>
@@ -207,11 +215,11 @@ sudo ./arena-tunnel-client-linux-amd64
 [Interface]
 PrivateKey = &lt;server-priv&gt;
 ListenPort = 51820
-Address    = 10.200.0.1/24
+Address    = 10.201.0.1/16
 
 [Peer]
 PublicKey  = &lt;client-pub&gt;
-AllowedIPs = 10.200.0.2/32
+AllowedIPs = 10.201.0.2/32
 
 # 2. Run arena-tunnel server
 arena-tunnel-server --listen 127.0.0.1:8888 --wg 127.0.0.1:51820
@@ -221,10 +229,10 @@ arena-tunnel-server --listen 127.0.0.1:8888 --wg 127.0.0.1:51820
 
     <h3>Client (explicit flags)</h3>
     <pre><code># Linux / macOS — needs root for /dev/net/tun
-sudo ./arena-tunnel-client-linux-amd64 \
+sudo arena-byoc \
   -priv &lt;peer-priv-b64&gt; \
   -pub  &lt;server-pub-b64&gt; \
-  -ip   10.200.0.2 \
+  -ip   10.201.0.2 \
   -host wg.example.com</code></pre>
     <p>Or bake credentials in at build time via <code>build.sh</code> for a zero-config, one-binary UX (this is how ARENA generates each student's download).</p>
   </div>
