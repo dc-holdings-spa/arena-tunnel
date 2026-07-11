@@ -33,7 +33,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime"
 	"sync"
@@ -225,41 +224,14 @@ var pushRoutes = []string{
 	"10.128.0.0/9",
 }
 
-func configureTUN(ipStr string) error {
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("interface config only implemented for linux (PR welcome)")
-	}
-	// Set address. /16 so the whole tunnel pool (10.201.0.0/16, widened from
-	// /24) is on-link — the server gateway 10.201.0.1 and any peer /32 sit in
-	// the same supernet regardless of which /24 this client's IP landed in.
-	if err := exec.Command("ip", "addr", "add", ipStr+"/16", "dev", tunnelName).Run(); err != nil {
-		return fmt.Errorf("ip addr add: %w", err)
-	}
-	// Bring up
-	if err := exec.Command("ip", "link", "set", tunnelName, "up").Run(); err != nil {
-		return fmt.Errorf("ip link set up: %w", err)
-	}
-	// Install routes
-	for _, r := range pushRoutes {
-		// Replace, not add, so re-running over a partial config is safe.
-		if err := exec.Command("ip", "route", "replace", r, "dev", tunnelName).Run(); err != nil {
-			log.Printf("[route] failed to install %s: %v", r, err)
-		} else {
-			log.Printf("[route] %s via %s", r, tunnelName)
-		}
-	}
-	return nil
-}
-
-func teardownTUN() {
-	if runtime.GOOS == "linux" {
-		for _, r := range pushRoutes {
-			exec.Command("ip", "route", "del", r, "dev", tunnelName).Run()
-		}
-		exec.Command("ip", "link", "set", tunnelName, "down").Run()
-		exec.Command("ip", "addr", "flush", "dev", tunnelName).Run()
-	}
-}
+// configureTUN and teardownTUN are implemented per-OS in
+// tun_config_{linux,windows,other}.go — the correct impl is picked by
+// build tags.
+//
+// Signature deliberately takes the tun.Device so the Windows impl can
+// pull the NDIS LUID out of the wintun adapter and drive winipcfg
+// directly (netsh / Get-NetAdapter can't see a wintun adapter — it is
+// owned by the calling process, not registered as a Windows connection).
 
 // ---------------- PID lock file ----------------
 // pidFilePath is declared in pid_unix.go / pid_windows.go (platform-specific).
@@ -621,14 +593,14 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		return ExitFatalRuntime
 	}
 
-	if err := configureTUN(cfg.TunnelIP); err != nil {
+	if err := configureTUN(tdev, cfg.TunnelIP); err != nil {
 		log.Printf("[tun] config: %v", err)
 		udpConn.Close()
 		dev.Close()
 		tdev.Close()
 		return ExitFatalRuntime
 	}
-	defer teardownTUN()
+	defer teardownTUN(tdev)
 
 	log.Printf("[+] arena-byoc %s", version)
 	log.Printf("[+] WG up: tunnelIP=%s server=%s local-udp-port=%d", cfg.TunnelIP, host, localPort)
