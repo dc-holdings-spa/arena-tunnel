@@ -19,3 +19,8 @@ func installKillSwitch(_ string, _ []string) error {
 func teardownKillSwitch() error {
 	return nil
 }
+
+// recoverKillSwitchIfLeftArmed is a no-op on unsupported platforms —
+// there is no armed state to recover from because installKillSwitch
+// always fails first.
+func recoverKillSwitchIfLeftArmed() {}

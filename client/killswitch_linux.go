@@ -24,11 +24,35 @@ package main
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
 const killSwitchChain = "ARENA_KILLSWITCH"
+
+// armedMarkerPath returns the path of a small marker file we drop while
+// the kill switch is armed. If it survives a subsequent process crash
+// we run teardown at startup so the student can reach the network again
+// — otherwise they are permanently locked out with no way to redownload
+// arena-byoc or ask for help.
+func armedMarkerPath() string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "arena-byoc", "killswitch.armed")
+}
+
+// recoverKillSwitchIfLeftArmed is called at the top of every arena-byoc
+// startup. Safe to call unconditionally; no-op when nothing is armed.
+func recoverKillSwitchIfLeftArmed() {
+	if _, err := os.Stat(armedMarkerPath()); err == nil {
+		_ = teardownKillSwitch()
+		_ = os.Remove(armedMarkerPath())
+	}
+}
 
 // installKillSwitch idempotently builds the ARENA_KILLSWITCH chain and
 // splices it at the top of OUTPUT. Called once after WireGuard adapter
@@ -86,6 +110,12 @@ func installKillSwitch(tunnelName string, allowedHosts []string) error {
 		return fmt.Errorf("iptables -I OUTPUT: %w", err)
 	}
 
+	// Drop an armed-marker so the next startup can recover from a
+	// hard crash. Best-effort — if the write fails the kill switch
+	// still enforces, we just lose the recovery beacon.
+	_ = os.MkdirAll(filepath.Dir(armedMarkerPath()), 0o755)
+	_ = os.WriteFile(armedMarkerPath(), []byte("armed"), 0o644)
+
 	return nil
 }
 
@@ -95,6 +125,7 @@ func teardownKillSwitch() error {
 	_ = exec.Command("iptables", "-D", "OUTPUT", "-j", killSwitchChain).Run()
 	_ = exec.Command("iptables", "-F", killSwitchChain).Run()
 	_ = exec.Command("iptables", "-X", killSwitchChain).Run()
+	_ = os.Remove(armedMarkerPath())
 	return nil
 }
 

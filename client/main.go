@@ -955,6 +955,14 @@ func derivePubKey(privB64 string) (string, error) {
 func main() {
 	rf := parseArgs()
 
+	// Recover from a previous unclean shutdown that left the kill
+	// switch armed. If the marker file exists, teardown fires before
+	// we do anything else — otherwise the student would be stuck
+	// unable to reach even arena.adversario.cl to redownload the CLI.
+	// No-op when nothing was armed. Runs unconditionally so it also
+	// heals a stale state from a version bump.
+	recoverKillSwitchIfLeftArmed()
+
 	// Root context cancelled on SIGINT/SIGTERM, so PAIR loops and the
 	// CONNECT shovel both exit cleanly without process-wide signal magic.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
