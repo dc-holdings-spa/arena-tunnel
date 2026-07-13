@@ -299,6 +299,14 @@ type rootFlags struct {
 	host string
 
 	verbose bool
+
+	// Sprint 8 T3 (rtaas): client-side kill switch. When on, the client
+	// installs OS firewall rules that DROP outbound traffic outside the
+	// tunnel (see killswitch_{linux,windows,other}.go). Off by default in
+	// portable mode — a USB / one-off run shouldn't leave hardened
+	// firewall state behind if it crashes.
+	killSwitch bool
+	portable   bool
 }
 
 func parseArgs() *rootFlags {
@@ -317,6 +325,24 @@ func parseArgs() *rootFlags {
 	fs.StringVar(&rf.ip, "ip", "", "override baked tunnel IP — headless")
 	fs.StringVar(&rf.host, "host", "", "override baked server host — headless")
 	fs.BoolVar(&rf.verbose, "v", false, "verbose WG logs")
+	// v1.4.0 scope: kill switch enforcement is production-tested on
+	// Linux only. Windows Firewall Service will silently no-op the
+	// DefaultOutboundAction flip unless arena-byoc.exe runs at HIGH
+	// integrity — install.ps1's Start-Process launcher spawns a MEDIUM
+	// integrity child, so the switch would report "armed" while
+	// actually leaving public egress wide open. Rather than mislead the
+	// RTaaS chip into showing PROTECTED, we ship v1.4.0 with the flag
+	// default OFF on Windows and the code path untouched for a proper
+	// Sprint 9 rework (either an embedded requireAdministrator manifest
+	// or a full Windows Service split — see docs/kill-switch-scope.md).
+	// Users who explicitly pass `-kill-switch=true` on Windows still get
+	// the elevation-guard error, so no silent fake-security.
+	killSwitchDefault := true
+	if runtime.GOOS == "windows" {
+		killSwitchDefault = false
+	}
+	fs.BoolVar(&rf.killSwitch, "kill-switch", killSwitchDefault, "install OS firewall rules that DROP outbound traffic outside the tunnel (default: on for Linux, off for Windows in v1.4.0; auto-disabled in portable mode)")
+	fs.BoolVar(&rf.portable, "portable", false, "portable mode: skip firewall + config write (implies -kill-switch=false)")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, usageText)
@@ -348,6 +374,20 @@ func parseArgs() *rootFlags {
 		} else {
 			rf.arena = defaultArenaBaseURL
 		}
+	}
+
+	// Portable mode overrides kill switch. A student running the binary
+	// straight off a USB stick doesn't want firewall state that survives
+	// a crash — the whole point of portable is "no persistent side
+	// effects on this machine". Honor ARENA_PORTABLE=1 too so the
+	// wrapper installer on locked-down laptops can opt in without a CLI
+	// flag flip.
+	if !rf.portable && os.Getenv("ARENA_PORTABLE") == "1" {
+		rf.portable = true
+	}
+	if rf.portable && rf.killSwitch {
+		log.Println("[kill-switch] portable mode — disabled (no persistent firewall state)")
+		rf.killSwitch = false
 	}
 	return rf
 }
@@ -601,6 +641,37 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		return ExitFatalRuntime
 	}
 	defer teardownTUN(tdev)
+
+	// Kill switch — arm AFTER the tunnel is up so a botched install
+	// can't strand the user with a blocked internet and no way back in.
+	// Teardown fires only on a clean shutdown; network drops go through
+	// runShovel's reconnect loop without ever leaving runConnect, so
+	// flaky Wi-Fi doesn't tear down protection.
+	killSwitchArmed := false
+	if rf.killSwitch {
+		allowedHosts := allowedControlPlaneHosts(cfg, rf.arena)
+		if err := installKillSwitch(tunnelName, allowedHosts); err != nil {
+			log.Printf("[kill-switch] install failed: %v (continuing without firewall protection)", err)
+		} else {
+			log.Println("[kill-switch] armed")
+			killSwitchArmed = true
+			defer func() {
+				if err := teardownKillSwitch(); err != nil {
+					log.Printf("[kill-switch] teardown: %v", err)
+				}
+			}()
+		}
+	}
+
+	// Kill-switch heartbeat: report armed state to the RTaaS server
+	// every 60s so the dashboard chip renders PROTECTED / UNPROTECTED
+	// honestly. Fires whether or not the switch is armed — the server
+	// needs the negative signal too.
+	if cfg.ArenaBaseURL != "" && cfg.RevocationToken != "" {
+		if peerID, err := derivePubKey(cfg.PrivateKey); err == nil {
+			startHeartbeat(ctx, cfg.ArenaBaseURL, peerID, cfg.RevocationToken, killSwitchArmed)
+		}
+	}
 
 	log.Printf("[+] arena-byoc %s", version)
 	log.Printf("[+] WG up: tunnelIP=%s server=%s local-udp-port=%d", cfg.TunnelIP, host, localPort)
@@ -900,6 +971,14 @@ func derivePubKey(privB64 string) (string, error) {
 func main() {
 	rf := parseArgs()
 
+	// Recover from a previous unclean shutdown that left the kill
+	// switch armed. If the marker file exists, teardown fires before
+	// we do anything else — otherwise the student would be stuck
+	// unable to reach even arena.adversario.cl to redownload the CLI.
+	// No-op when nothing was armed. Runs unconditionally so it also
+	// heals a stale state from a version bump.
+	recoverKillSwitchIfLeftArmed()
+
 	// Root context cancelled on SIGINT/SIGTERM, so PAIR loops and the
 	// CONNECT shovel both exit cleanly without process-wide signal magic.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -914,4 +993,31 @@ func pick(override, baked string) string {
 		return override
 	}
 	return baked
+}
+
+// allowedControlPlaneHosts collects the hostnames the kill switch has
+// to keep reachable OUTSIDE the tunnel: the arena control plane
+// (pair/status/logout/heartbeat) and the WSS server (wg-byoc). If
+// these get DROPed we can't reconnect after a hiccup — nor can the
+// server tell us we've been revoked.
+func allowedControlPlaneHosts(cfg *Config, arenaBaseURL string) []string {
+	hosts := map[string]struct{}{}
+	if cfg.ServerHost != "" {
+		hosts[cfg.ServerHost] = struct{}{}
+	} else if serverHost != "" {
+		hosts[serverHost] = struct{}{}
+	}
+	for _, raw := range []string{cfg.ArenaBaseURL, arenaBaseURL} {
+		if raw == "" {
+			continue
+		}
+		if u, err := url.Parse(raw); err == nil && u.Host != "" {
+			hosts[u.Hostname()] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(hosts))
+	for h := range hosts {
+		out = append(out, h)
+	}
+	return out
 }
