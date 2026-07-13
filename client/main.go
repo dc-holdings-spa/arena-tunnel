@@ -325,7 +325,23 @@ func parseArgs() *rootFlags {
 	fs.StringVar(&rf.ip, "ip", "", "override baked tunnel IP — headless")
 	fs.StringVar(&rf.host, "host", "", "override baked server host — headless")
 	fs.BoolVar(&rf.verbose, "v", false, "verbose WG logs")
-	fs.BoolVar(&rf.killSwitch, "kill-switch", true, "install OS firewall rules that DROP outbound traffic outside the tunnel (default: on; auto-disabled in portable mode)")
+	// v1.4.0 scope: kill switch enforcement is production-tested on
+	// Linux only. Windows Firewall Service will silently no-op the
+	// DefaultOutboundAction flip unless arena-byoc.exe runs at HIGH
+	// integrity — install.ps1's Start-Process launcher spawns a MEDIUM
+	// integrity child, so the switch would report "armed" while
+	// actually leaving public egress wide open. Rather than mislead the
+	// RTaaS chip into showing PROTECTED, we ship v1.4.0 with the flag
+	// default OFF on Windows and the code path untouched for a proper
+	// Sprint 9 rework (either an embedded requireAdministrator manifest
+	// or a full Windows Service split — see docs/kill-switch-scope.md).
+	// Users who explicitly pass `-kill-switch=true` on Windows still get
+	// the elevation-guard error, so no silent fake-security.
+	killSwitchDefault := true
+	if runtime.GOOS == "windows" {
+		killSwitchDefault = false
+	}
+	fs.BoolVar(&rf.killSwitch, "kill-switch", killSwitchDefault, "install OS firewall rules that DROP outbound traffic outside the tunnel (default: on for Linux, off for Windows in v1.4.0; auto-disabled in portable mode)")
 	fs.BoolVar(&rf.portable, "portable", false, "portable mode: skip firewall + config write (implies -kill-switch=false)")
 
 	fs.Usage = func() {
