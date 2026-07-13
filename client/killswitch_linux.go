@@ -22,6 +22,7 @@ package main
 // root during install so no extra privilege escalation is needed.
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -79,6 +80,19 @@ func installKillSwitch(tunnelName string, allowedHosts []string) error {
 		rules = append(rules, []string{"-d", cidr, "-j", "ACCEPT"})
 	}
 
+	// 3b. Detect DNS resolvers from /etc/resolv.conf. If the student's
+	//     laptop points at their home router (typically 192.168.1.1)
+	//     the LAN allow already covers it. But cloud VMs, cafe Wi-Fi
+	//     captive portals, and containers routinely ship explicit
+	//     public resolvers like 1.1.1.1 or 8.8.8.8 — DROPping those
+	//     kills DNS entirely and every subsequent hostname lookup
+	//     (including the WSS reconnect to wg-byoc.adversario.cl) hangs.
+	//     Allow them on UDP + TCP 53 only, not blanket egress.
+	for _, dns := range detectResolvers() {
+		rules = append(rules, []string{"-p", "udp", "-d", dns, "--dport", "53", "-j", "ACCEPT"})
+		rules = append(rules, []string{"-p", "tcp", "-d", dns, "--dport", "53", "-j", "ACCEPT"})
+	}
+
 	// 4. Resolve + allow the control-plane hosts. Resolves once at
 	//    install time; if the DNS answers rotate we re-install on next
 	//    startup so the rules stay accurate.
@@ -88,6 +102,15 @@ func installKillSwitch(tunnelName string, allowedHosts []string) error {
 			continue // best-effort — a hostname miss is not fatal
 		}
 		for _, ip := range ips {
+			// iptables is IPv4-only. Cloudflare-fronted hosts (like
+			// arena.adversario.cl) resolve to both AAAA and A; passing
+			// a v6 address to iptables makes it exit 2 and abort the
+			// whole install, taking every prior rule down with it.
+			// Skip v6 silently — the v4 record is enough because the
+			// tunnel is IPv4 anyway.
+			if ip.To4() == nil {
+				continue
+			}
 			rules = append(rules, []string{"-d", ip.String(), "-j", "ACCEPT"})
 		}
 	}
@@ -127,6 +150,40 @@ func teardownKillSwitch() error {
 	_ = exec.Command("iptables", "-X", killSwitchChain).Run()
 	_ = os.Remove(armedMarkerPath())
 	return nil
+}
+
+// detectResolvers reads /etc/resolv.conf and returns the IPv4
+// addresses of the DNS resolvers the system is configured to use.
+// systemd-resolved's `127.0.0.53` (or `127.0.0.54`) is treated as
+// loopback and skipped — the LAN allow list already permits any
+// LAN-local resolver, and loopback is covered by its own rule.
+func detectResolvers() []string {
+	f, err := os.Open("/etc/resolv.conf")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "nameserver") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ip := net.ParseIP(fields[1])
+		if ip == nil || ip.To4() == nil {
+			continue // v6 handled by ip6tables in a future round
+		}
+		if ip.IsLoopback() {
+			continue // covered by the "-o lo" rule already
+		}
+		out = append(out, ip.String())
+	}
+	return out
 }
 
 // detectLocalCIDRs enumerates every interface's IPv4 CIDR, excluding
