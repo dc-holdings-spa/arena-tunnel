@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-var pidFilePath = filepath.Join(os.TempDir(), "arena-byoc.pid")
+var pidFilePath = filepath.Join(os.TempDir(), "arena-tunnel.pid")
 
 // processExists returns true when a process with the given PID is running.
 // Uses kill(2) signal 0 — no signal is delivered, just checks existence.

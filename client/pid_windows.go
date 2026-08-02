@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-var pidFilePath = filepath.Join(os.TempDir(), "arena-byoc.pid")
+var pidFilePath = filepath.Join(os.TempDir(), "arena-tunnel.pid")
 
 // processExists returns true when a process with the given PID is running.
 // On Windows, reliable existence checks require cgo (OpenProcess). Without

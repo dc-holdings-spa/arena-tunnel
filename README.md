@@ -31,7 +31,7 @@ Result: a **stable, encrypted, NAT-traversing tunnel that costs $0/month** and s
 ```
    Client side                      Public CDN                         Server side
 ─────────────────────         ────────────────────────         ──────────────────────────
-arena-byoc (client)                                            arena-tunnel-server
+arena-tunnel (client)                                            arena-tunnel-server
    ├─ wireguard-go (TUN)                                            ↑
    └─ WSS dialer ──► wss://your-host/tunnel ──► cloudflared ──►    │  WS upgrade
                           (free tier)                               ▼
@@ -47,7 +47,7 @@ In Adversario Arena, `arena-manager` (the control plane) manages peer lifecycle 
 
 ## Quick start — Arena students
 
-Download the latest `arena-byoc` binary from [Releases](https://github.com/dc-holdings-spa/arena-tunnel/releases), then:
+Download the latest `arena-tunnel` binary from [Releases](https://github.com/dc-holdings-spa/arena-tunnel/releases), then:
 
 ```bash
 # Linux / macOS — run as root (TUN device needs CAP_NET_ADMIN)
@@ -71,7 +71,7 @@ On first run (or after `pair`), the binary prints a code and URL:
 Open the URL, authorize, and the tunnel comes up automatically — no second command:
 
 ```
-[+] arena-byoc v1.1.0
+[+] arena-tunnel v1.1.0
 [+] WG up: tunnelIP=10.201.0.4 server=wg-byoc.adversario.cl local-udp-port=56096
 [+] identity: student@example.com
 [wss] connected
@@ -95,17 +95,17 @@ Open the URL, authorize, and the tunnel comes up automatically — no second com
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Credentials are saved to `/root/.config/arena-byoc/config.json` (mode 0600). Subsequent runs skip the browser flow and connect directly.
+Credentials are saved to `/root/.config/arena-tunnel/config.json` (mode 0600). Subsequent runs skip the browser flow and connect directly.
 
 ## Subcommands
 
 ```
-arena-byoc [flags]              Pair if needed, then run tunnel (default).
-arena-byoc pair [--force]       Force the browser-pairing flow regardless of saved config.
-arena-byoc logout               Wipe local config and revoke the peer server-side.
-arena-byoc logout --keep-server Wipe local config only; leave the server-side peer alive.
-arena-byoc status               Show stored identity + ping arena for peer state.
-arena-byoc version              Print build version.
+arena-tunnel [flags]              Pair if needed, then run tunnel (default).
+arena-tunnel pair [--force]       Force the browser-pairing flow regardless of saved config.
+arena-tunnel logout               Wipe local config and revoke the peer server-side.
+arena-tunnel logout --keep-server Wipe local config only; leave the server-side peer alive.
+arena-tunnel status               Show stored identity + ping arena for peer state.
+arena-tunnel version              Print build version.
 ```
 
 ## Flags
@@ -196,7 +196,7 @@ main.serverPubKeyB64   — server WG public key (base64)
 main.tunnelIP          — client tunnel IP (e.g. "10.201.0.4")
 main.serverHost        — WSS hostname (e.g. "wg-byoc.adversario.cl")
 main.version           — version string shown in logs + User-Agent
-main.tunnelName        — TUN interface name (default "arena-byoc")
+main.tunnelName        — TUN interface name (default "arena-tunnel")
 ```
 
 Baked creds take precedence over on-disk config. If all three of `privKeyB64 / serverPubKeyB64 / tunnelIP` are non-empty at build time, the pairing flow is skipped entirely.
@@ -207,7 +207,7 @@ Baked creds take precedence over on-disk config. If all three of `privKeyB64 / s
 - **Authenticity**: WireGuard noise handshake authenticates both sides via public keys.
 - **Replay/MITM**: WireGuard's replay window + TLS as defence in depth.
 - **Peer identity**: each peer has a unique private key. Server enforces per-peer `/32` AllowedIPs so one peer can't impersonate another inside the tunnel.
-- **Revocation**: the control plane (arena-manager) stores a SHA-256 hash of a revocation token issued at pairing time. `arena-byoc logout` sends a signed DELETE to revoke the peer; the server then refuses WG handshakes from that pubkey within seconds. A leaked binary is dead as soon as the peer is revoked.
+- **Revocation**: the control plane (arena-manager) stores a SHA-256 hash of a revocation token issued at pairing time. `arena-tunnel logout` sends a signed DELETE to revoke the peer; the server then refuses WG handshakes from that pubkey within seconds. A leaked binary is dead as soon as the peer is revoked.
 - **The CDN**: trust boundary. Cloudflare sees connection metadata but not payload content. The protocol is CDN-agnostic — swap in any WSS-capable proxy.
 
 Full model in [SECURITY.md](SECURITY.md). Vulnerability reports: [security@adversario.cl](mailto:security@adversario.cl).

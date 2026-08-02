@@ -1,12 +1,12 @@
-// arena-byoc — single-binary BYOC2 client.
+// arena-tunnel — single-binary BYOC2 client.
 //
 // Two ways to ship credentials:
 //
 //   1. Browser pairing (the new default UX):
-//        $ arena-byoc
+//        $ arena-tunnel
 //        → prints a 6-char code, opens https://arena.adversario.cl/byoc2/connect?code=...
 //        → user authorizes in the browser, binary polls /api/byoc2/pair/poll
-//        → creds are written to ~/.config/arena-byoc/config.json (0600)
+//        → creds are written to ~/.config/arena-tunnel/config.json (0600)
 //        → subsequent runs read that file and skip the browser flow.
 //
 //   2. Legacy bake-at-build (still supported for headless / CI):
@@ -53,7 +53,7 @@ var (
 	serverPubKeyB64 = "" // arena WG server public key
 	tunnelIP        = "" // e.g. "10.201.0.5"
 	serverHost      = "wg-byoc.adversario.cl"
-	tunnelName      = "arena-byoc"
+	tunnelName      = "arena-tunnel"
 
 	// version is overridden via -ldflags -X main.version=...
 	version = "dev"
@@ -258,7 +258,7 @@ func acquirePIDLock() bool {
 		var pid int
 		if _, serr := fmt.Sscan(string(raw), &pid); serr == nil && pid > 0 {
 			if processExists(pid) {
-				fmt.Fprintf(os.Stderr, "[!] arena-byoc is already running (pid %d). Run 'arena-byoc logout' to stop it.\n", pid)
+				fmt.Fprintf(os.Stderr, "[!] arena-tunnel is already running (pid %d). Run 'arena-tunnel logout' to stop it.\n", pid)
 				return false
 			}
 		}
@@ -279,7 +279,7 @@ func releasePIDLock() {
 
 // rootFlags holds everything parsed from the command line. We use a
 // single flag set rather than per-subcommand sets so the legacy
-// `arena-byoc -priv ... -pub ...` syntax keeps working without forcing
+// `arena-tunnel -priv ... -pub ...` syntax keeps working without forcing
 // the user to remember which subcommand it lived under.
 type rootFlags struct {
 	subcommand string
@@ -310,7 +310,7 @@ type rootFlags struct {
 }
 
 func parseArgs() *rootFlags {
-	fs := flag.NewFlagSet("arena-byoc", flag.ExitOnError)
+	fs := flag.NewFlagSet("arena-tunnel", flag.ExitOnError)
 	rf := &rootFlags{}
 
 	fs.StringVar(&rf.arena, "arena", "", "Override arena base URL (env: ARENA_BYOC_URL).")
@@ -327,7 +327,7 @@ func parseArgs() *rootFlags {
 	fs.BoolVar(&rf.verbose, "v", false, "verbose WG logs")
 	// v1.4.0 scope: kill switch enforcement is production-tested on
 	// Linux only. Windows Firewall Service will silently no-op the
-	// DefaultOutboundAction flip unless arena-byoc.exe runs at HIGH
+	// DefaultOutboundAction flip unless arena-tunnel.exe runs at HIGH
 	// integrity — install.ps1's Start-Process launcher spawns a MEDIUM
 	// integrity child, so the switch would report "armed" while
 	// actually leaving public egress wide open. Rather than mislead the
@@ -350,7 +350,7 @@ func parseArgs() *rootFlags {
 	}
 
 	// Pull the optional subcommand off os.Args before flag parsing,
-	// so `arena-byoc logout --keep-server` and `arena-byoc -v` both work.
+	// so `arena-tunnel logout --keep-server` and `arena-tunnel -v` both work.
 	args := os.Args[1:]
 	if len(args) > 0 && !isFlagLike(args[0]) {
 		switch args[0] {
@@ -396,16 +396,16 @@ func isFlagLike(s string) bool {
 	return len(s) > 0 && s[0] == '-'
 }
 
-const usageText = `arena-byoc — BYOC2 client tunnel for Arena.
+const usageText = `arena-tunnel — BYOC2 client tunnel for Arena.
 
 Usage:
-  arena-byoc [flags]              Pair if needed, then run tunnel.
-  arena-byoc pair [--force]       Force the browser-pairing flow.
-  arena-byoc logout [--keep-server]
+  arena-tunnel [flags]              Pair if needed, then run tunnel.
+  arena-tunnel pair [--force]       Force the browser-pairing flow.
+  arena-tunnel logout [--keep-server]
                                   Wipe local config; revoke peer server-side.
-  arena-byoc status               Show stored identity + ping arena.
-  arena-byoc version              Print build version.
-  arena-byoc help                 Print this message.
+  arena-tunnel status               Show stored identity + ping arena.
+  arena-tunnel version              Print build version.
+  arena-tunnel help                 Print this message.
 
 Flags:
 `
@@ -415,7 +415,7 @@ Flags:
 func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
 	switch rf.subcommand {
 	case "version":
-		fmt.Printf("arena-byoc %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("arena-tunnel %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 		return ExitOK
 	case "help":
 		fmt.Fprint(os.Stdout, usageText)
@@ -673,7 +673,7 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		}
 	}
 
-	log.Printf("[+] arena-byoc %s", version)
+	log.Printf("[+] arena-tunnel %s", version)
 	log.Printf("[+] WG up: tunnelIP=%s server=%s local-udp-port=%d", cfg.TunnelIP, host, localPort)
 	if cfg.UserEmail != "" {
 		log.Printf("[+] identity: %s", cfg.UserEmail)
@@ -710,7 +710,7 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 						})
 					}
 					if revoked {
-						log.Println("[!] peer revoked server-side — shutting down. Run `arena-byoc pair` to re-pair.")
+						log.Println("[!] peer revoked server-side — shutting down. Run `arena-tunnel pair` to re-pair.")
 						cancel()
 						return
 					}
@@ -808,7 +808,7 @@ func runStatus(ctx context.Context, rf *rootFlags) int {
 		return ExitFatalRuntime
 	}
 	if cfg == nil {
-		fmt.Println("Not paired. Run `arena-byoc` to pair.")
+		fmt.Println("Not paired. Run `arena-tunnel` to pair.")
 		return ExitFatalRuntime
 	}
 
@@ -832,7 +832,7 @@ func runStatus(ctx context.Context, rf *rootFlags) int {
 	}
 	fmt.Printf("arena state:  %s\n", state)
 	if state == "revoked" {
-		fmt.Println("Run `arena-byoc pair --force` to re-pair.")
+		fmt.Println("Run `arena-tunnel pair --force` to re-pair.")
 		return ExitPairInitFailed
 	}
 	return ExitOK

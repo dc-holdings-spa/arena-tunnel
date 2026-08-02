@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build per-student arena-byoc binary with baked credentials.
+# Build per-student arena-tunnel binary with baked credentials.
 # Used by arena-manager API to generate downloads on-demand.
 #
 # SECURITY:
@@ -17,7 +17,7 @@
 #   echo -n "<priv-b64>" | ./build.sh <server-pub-b64> <tunnel-ip> <server-host> <goos> <goarch> <out>
 #
 # Example:
-#   echo -n "yA5R..." | ./build.sh "aRd6..." 10.201.0.5 wg-byoc.adversario.cl linux amd64 /tmp/arena-byoc
+#   echo -n "yA5R..." | ./build.sh "aRd6..." 10.201.0.5 wg-byoc.adversario.cl linux amd64 /tmp/arena-tunnel
 
 set -euo pipefail
 
@@ -65,7 +65,7 @@ fi
 
 # Per-build temp dir for the generated creds source file. We refuse to overwrite
 # someone else's creds file mid-build by giving each build its own working tree.
-WORKDIR="$(mktemp -d -t arena-byoc-build-XXXXXX)"
+WORKDIR="$(mktemp -d -t arena-tunnel-build-XXXXXX)"
 GEN_DIR="$WORKDIR/client"
 trap 'rm -rf "$WORKDIR"' EXIT
 

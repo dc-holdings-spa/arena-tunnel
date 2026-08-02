@@ -1,12 +1,12 @@
-// config.go — on-disk pairing state for arena-byoc.
+// config.go — on-disk pairing state for arena-tunnel.
 //
 // Path resolution (first match wins):
 //   1. $ARENA_BYOC_CONFIG (explicit override).
-//   2. $XDG_CONFIG_HOME/arena-byoc/config.json (if set).
-//   3. linux/bsd: $HOME/.config/arena-byoc/config.json
-//      darwin:    $HOME/Library/Application Support/arena-byoc/config.json
-//      windows:   %APPDATA%\arena-byoc\config.json  (fallback %USERPROFILE%\.arena-byoc\config.json)
-//   4. cwd/arena-byoc.json (last-resort, with stderr warning).
+//   2. $XDG_CONFIG_HOME/arena-tunnel/config.json (if set).
+//   3. linux/bsd: $HOME/.config/arena-tunnel/config.json
+//      darwin:    $HOME/Library/Application Support/arena-tunnel/config.json
+//      windows:   %APPDATA%\arena-tunnel\config.json  (fallback %USERPROFILE%\.arena-tunnel\config.json)
+//   4. cwd/arena-tunnel.json (last-resort, with stderr warning).
 //
 // Permissions: dir 0700, file 0600 on unix. Atomic write via tmp + rename.
 // Schema version 1: any version mismatch or parse error is treated as
@@ -64,26 +64,26 @@ func ResolveConfigPath(override string) (string, error) {
 		return env, nil
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "arena-byoc", "config.json"), nil
+		return filepath.Join(xdg, "arena-tunnel", "config.json"), nil
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		// Degraded fallback: keep next to cwd. We still want SOMETHING.
-		fmt.Fprintln(os.Stderr, "[warn] $HOME unresolvable, persisting config to ./arena-byoc.json")
-		return "arena-byoc.json", nil
+		fmt.Fprintln(os.Stderr, "[warn] $HOME unresolvable, persisting config to ./arena-tunnel.json")
+		return "arena-tunnel.json", nil
 	}
 
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "arena-byoc", "config.json"), nil
+		return filepath.Join(home, "Library", "Application Support", "arena-tunnel", "config.json"), nil
 	case "windows":
 		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			return filepath.Join(appdata, "arena-byoc", "config.json"), nil
+			return filepath.Join(appdata, "arena-tunnel", "config.json"), nil
 		}
-		return filepath.Join(home, ".arena-byoc", "config.json"), nil
+		return filepath.Join(home, ".arena-tunnel", "config.json"), nil
 	default:
-		return filepath.Join(home, ".config", "arena-byoc", "config.json"), nil
+		return filepath.Join(home, ".config", "arena-tunnel", "config.json"), nil
 	}
 }
 

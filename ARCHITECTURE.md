@@ -17,7 +17,7 @@ Explicit non-goals: kernel-level performance, multi-tenant on a single tunnel, r
 ```
   Student laptop                 Cloudflare CDN             arena-manager (192.168.1.10)
   ──────────────                 ──────────────             ────────────────────────────
-  arena-byoc                                                arena-tunnel-server
+  arena-tunnel                                                arena-tunnel-server
     ├─ wireguard-go (TUN)                                     ↑
     └─ WSS dialer ──► wss://wg-byoc.adversario.cl/tunnel ──►  │ WS upgrade
                            (CF free tunnel)                    ▼
@@ -48,7 +48,7 @@ Explicit non-goals: kernel-level performance, multi-tenant on a single tunnel, r
 ```
 Student CLI                     arena-manager                      Student browser
 ────────────                    ─────────────                      ───────────────
-sudo arena-byoc
+sudo arena-tunnel
   └─ POST /pair/init
         ← {code, claimUrl}
   └─ prints code + URL
@@ -109,7 +109,7 @@ Each new WS connection gets a fresh `net.DialUDP` to `wg-byoc`. This gives **eac
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ wireguard-go device                                    │  │
 │  │   ├── conn.NewDefaultBind() (UDP)                      │  │
-│  │   └── TUN device "arena-byoc"                         │  │
+│  │   └── TUN device "arena-tunnel"                         │  │
 │  └──────────────────┬───────────────────────────────────┘  │
 │                     ▼ UDP loopback                           │
 │  ┌────────────────────────────────────────────────────────┐  │
@@ -184,7 +184,7 @@ Workers Free CPU-ms accounting makes sustained C2 traffic a time bomb. One noisy
 | wg-byoc interface restart             | All clients see UDP write timeouts. Next WS roundtrip triggers WG re-handshake.          | Auto, ~10s.        |
 | arena-tunnel-server crash             | systemd restarts the process. WSS reconnects.                                             | systemd auto.      |
 | Cloudflare drops WS as idle           | WG PersistentKeepalive=25s keeps frames flowing; CF's idle timeout is 100s.              | Auto.              |
-| Peer revoked server-side              | CLI's 60s poll detects `status=revoked` and exits. `arena-byoc pair` re-pairs.           | User re-pairs.     |
+| Peer revoked server-side              | CLI's 60s poll detects `status=revoked` and exits. `arena-tunnel pair` re-pairs.           | User re-pairs.     |
 
 ## Hardening (production checklist)
 

@@ -7,14 +7,14 @@ package main
 //
 // arena-tunnel v1.4.0. Same semantic as the Linux impl: block ALL
 // outbound traffic except:
-//   1. traffic exiting the arena-byoc wintun adapter
+//   1. traffic exiting the arena-tunnel wintun adapter
 //   2. traffic to loopback
 //   3. traffic to the scenario VLAN CIDR (10.128.0.0/9)
 //   4. traffic to the local LAN CIDRs detected at install time
 //   5. traffic to the resolved IPs of the ARENA control-plane host + the
 //      Cloudflare edges backing wg-byoc.adversario.cl
 //
-// The previous impl scoped a `-Program` block to arena-byoc.exe only —
+// The previous impl scoped a `-Program` block to arena-tunnel.exe only —
 // that blocked the tunnel client from talking to the LAN but left
 // Chrome / Firefox / anything-else free to leak the student's real IP
 // to the scenario target. That is the exact scenario a kill switch
@@ -53,10 +53,10 @@ func armedMarkerPath() string {
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "arena-byoc", "killswitch.armed")
+	return filepath.Join(base, "arena-tunnel", "killswitch.armed")
 }
 
-// recoverKillSwitchIfLeftArmed is called at the top of every arena-byoc
+// recoverKillSwitchIfLeftArmed is called at the top of every arena-tunnel
 // startup. If we find a stale armed-marker, we teardown the firewall
 // state so the student can reach the network again — this is the ONLY
 // recovery path for a hard-crash-while-armed scenario. Safe to call
@@ -161,7 +161,7 @@ func installKillSwitch(tunnelName string, allowedHosts []string) error {
 		return fmt.Errorf("verify default outbound: %w", err)
 	}
 	if !strings.Contains(strings.ToLower(strings.TrimSpace(string(out))), "block") {
-		return fmt.Errorf("default outbound still not Block (got %q) — arena-byoc.exe is not running elevated. Re-launch PowerShell as Administrator", strings.TrimSpace(string(out)))
+		return fmt.Errorf("default outbound still not Block (got %q) — arena-tunnel.exe is not running elevated. Re-launch PowerShell as Administrator", strings.TrimSpace(string(out)))
 	}
 
 	// 7. Drop an armed-marker so a subsequent crash-recovery pass can
@@ -175,7 +175,7 @@ func installKillSwitch(tunnelName string, allowedHosts []string) error {
 
 // teardownKillSwitch restores the default outbound policy AND removes
 // every rule under the ArenaKillSwitch group. Called only on
-// `arena-byoc uninstall` or a clean SIGTERM — NEVER on a network drop.
+// `arena-tunnel uninstall` or a clean SIGTERM — NEVER on a network drop.
 func teardownKillSwitch() error {
 	// Restore default outbound BEFORE removing our allow rules, so
 	// there is no instant during teardown where the student is fully
