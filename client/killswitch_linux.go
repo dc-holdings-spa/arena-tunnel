@@ -7,7 +7,7 @@ package main
 //
 // Sprint 7 T1 (arena-tunnel v1.4.0). Installs an iptables chain named
 // ARENA_KILLSWITCH that DROPs every outbound unicast packet except:
-//   1. traffic exiting the arena-byoc tun device
+//   1. traffic exiting the arena-tunnel tun device
 //   2. traffic to loopback
 //   3. traffic to the scenario VLAN CIDR (10.128.0.0/9)
 //   4. traffic to the local LAN CIDRs detected at install time
@@ -18,7 +18,7 @@ package main
 // user-installed rules. At install time we FLUSH + REBUILD idempotently
 // so a re-run picks up refreshed resolver results.
 //
-// Requires CAP_NET_ADMIN. The wrapper `arena-byoc` binary is invoked as
+// Requires CAP_NET_ADMIN. The wrapper `arena-tunnel` binary is invoked as
 // root during install so no extra privilege escalation is needed.
 
 import (
@@ -37,16 +37,16 @@ const killSwitchChain = "ARENA_KILLSWITCH"
 // the kill switch is armed. If it survives a subsequent process crash
 // we run teardown at startup so the student can reach the network again
 // — otherwise they are permanently locked out with no way to redownload
-// arena-byoc or ask for help.
+// arena-tunnel or ask for help.
 func armedMarkerPath() string {
 	base, err := os.UserCacheDir()
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "arena-byoc", "killswitch.armed")
+	return filepath.Join(base, "arena-tunnel", "killswitch.armed")
 }
 
-// recoverKillSwitchIfLeftArmed is called at the top of every arena-byoc
+// recoverKillSwitchIfLeftArmed is called at the top of every arena-tunnel
 // startup. Safe to call unconditionally; no-op when nothing is armed.
 func recoverKillSwitchIfLeftArmed() {
 	if _, err := os.Stat(armedMarkerPath()); err == nil {
@@ -143,7 +143,7 @@ func installKillSwitch(tunnelName string, allowedHosts []string) error {
 }
 
 // teardownKillSwitch removes the ARENA_KILLSWITCH chain. Called only on
-// `arena-byoc uninstall` or a clean SIGTERM — NEVER on a network drop.
+// `arena-tunnel uninstall` or a clean SIGTERM — NEVER on a network drop.
 func teardownKillSwitch() error {
 	_ = exec.Command("iptables", "-D", "OUTPUT", "-j", killSwitchChain).Run()
 	_ = exec.Command("iptables", "-F", killSwitchChain).Run()

@@ -8,9 +8,9 @@ Arena the *real* way — through `arena-tunnel` (WireGuard-over-WebSocket via th
 (rtaas monorepo, 2026-08-02). PRISM side is already deployed. Argonaut now runs
 **fully autonomously** — no human minting or pasting tokens.
 
-Historical: `arena-byoc` was the pre-2026-07 CLI name; the binary is now
-`arena-tunnel-client`. Install path (`/usr/local/bin/arena-byoc`), TUN
-interface name (`arena-byoc`), config dir (`~/.config/arena-byoc/`) still
+Historical: `arena-tunnel` was the pre-2026-07 CLI name; the binary is now
+`arena-tunnel-client`. Install path (`/usr/local/bin/arena-tunnel`), TUN
+interface name (`arena-tunnel`), config dir (`~/.config/arena-tunnel/`) still
 carry the legacy string internally — full rename is a separate follow-up PR
 (non-blocking).
 
@@ -21,7 +21,7 @@ carry the legacy string internally — full rename is a separate follow-up PR
 - PRISM stores `ARENA_POA_API_KEY` in its vault as `PRISM_ARENA_SERVICE_KEY`.
 - At engagement launch, PRISM calls **one endpoint** and receives durable WG
   creds + a redirector slot in a single round-trip.
-- PRISM writes the creds to `~/.config/arena-byoc/config.json` (existing
+- PRISM writes the creds to `~/.config/arena-tunnel/config.json` (existing
   schema — no client changes) and runs `arena-tunnel-client --portable
   --config <path>` inside its Exegol container.
 - Argonaut is an ArenaUser with `role='bot'` — audit-clean, `isBot` UI
@@ -108,7 +108,7 @@ Response 200:
 
 - Selected over §1's one-shot token: service-enroll returns creds inline,
   eliminating the 10-min TTL race entirely.
-- PRISM writes the bundle straight to `~/.config/arena-byoc/config.json`
+- PRISM writes the bundle straight to `~/.config/arena-tunnel/config.json`
   (schema-compatible with `arena-tunnel-client`'s existing loader), then
   launches the binary with `--portable --config <path>`.
 - No `--token` flag path taken. No client-side changes required.
@@ -142,7 +142,7 @@ cfg = {
     "revocationToken": resp["revocationToken"],
     "pairedAt":        datetime.utcnow().isoformat() + "Z",
 }
-path = f"/etc/arena-byoc/eng-{engagement_id}.json"
+path = f"/etc/arena-tunnel/eng-{engagement_id}.json"
 Path(path).write_text(json.dumps(cfg))
 Path(path).chmod(0o600)
 
@@ -169,7 +169,7 @@ subprocess.Popen([
    Today `ARENA_POA_API_KEY` is a shared secret with every scope. Landing
    per-key DB scopes lets us give Argonaut a key with only `byoc2:enroll`
    without inheriting `bot:enroll` / `play:validate` / etc.
-2. **Rename `arena-byoc` → `arena-tunnel`** — cosmetic (TUN name, install
+2. **Rename `arena-tunnel` → `arena-tunnel`** — cosmetic (TUN name, install
    path, config dir, PID file). Separate PR to keep this diff focused.
 3. **Update this doc** ← done (2026-08-02).
 
@@ -185,5 +185,5 @@ Arena side (`rtaas/apps/arena-manager`):
 - `docs/runbooks/argonaut-service-enroll.md` — bootstrap + rotation + revoke.
 
 Client (`arena-tunnel/client`):
-- `config.go` — schema for `~/.config/arena-byoc/config.json`.
+- `config.go` — schema for `~/.config/arena-tunnel/config.json`.
 - `main.go` — `--portable` + `--config` flags (unchanged).

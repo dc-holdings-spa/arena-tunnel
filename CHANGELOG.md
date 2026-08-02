@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **Connection banner**: after the WireGuard tunnel comes up, `arena-byoc` fetches
+- **Connection banner**: after the WireGuard tunnel comes up, `arena-tunnel` fetches
   `/api/users/me/c2-state` (using the stored revocation token) and prints a
   formatted box with tunnel IP, edge IP, listener bind IP + port, SNI cover domain,
   and HMAC attribution cookie name + value — the same data shown in the Weapons tab,
@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Initial public release, extracted from the Adversario Arena monorepo via `git subtree split`.
 - `arena-tunnel-server` — Go binary that bridges WSS↔UDP. Forwards binary WebSocket frames as UDP datagrams to a local WireGuard kernel interface.
-- `arena-tunnel-client` (also known as `arena-byoc`) — Go binary that creates a TUN device, runs `wireguard-go` in-process, and wraps the WG UDP path through WSS to the server. Credentials baked at compile-time via `-ldflags`.
+- `arena-tunnel-client` (also known as `arena-tunnel`) — Go binary that creates a TUN device, runs `wireguard-go` in-process, and wraps the WG UDP path through WSS to the server. Credentials baked at compile-time via `-ldflags`.
 - `build.sh` — helper for control planes to compile per-user binaries on-demand.
 - Cross-compile matrix: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64.
 - Bundled `wintun.dll` for the Windows TUN driver.

@@ -10,7 +10,7 @@
 
 Kill switch on Windows uses `Set-NetFirewallProfile -DefaultOutboundAction Block` plus a group of allow-list rules for the tunnel + LAN + Arena control plane. That call requires **HIGH integrity level**, not just Administrator group membership.
 
-install.ps1 already elevates its own PowerShell session (checks `IsInRole(Administrator)` and throws otherwise), but the `Start-Process arena-byoc.exe` it uses to spawn the daemon inherits **MEDIUM integrity** by default. `Set-NetFirewallProfile` from a MEDIUM child fails **silently** — no error return, no exception, just no effect on the profile. The verify step we added in `killswitch_windows.go` catches this and refuses to claim armed, but it also means the switch would refuse to arm on the default install flow.
+install.ps1 already elevates its own PowerShell session (checks `IsInRole(Administrator)` and throws otherwise), but the `Start-Process arena-tunnel.exe` it uses to spawn the daemon inherits **MEDIUM integrity** by default. `Set-NetFirewallProfile` from a MEDIUM child fails **silently** — no error return, no exception, just no effect on the profile. The verify step we added in `killswitch_windows.go` catches this and refuses to claim armed, but it also means the switch would refuse to arm on the default install flow.
 
 The fix belongs one layer up (either an embedded `requestedExecutionLevel level="requireAdministrator"` manifest, `Start-Process -Verb RunAs` in install.ps1, or the "real production" pattern — a Windows Service running as `LocalSystem`). Each has trade-offs we didn't want to hard-decide in the v1.4.0 window:
 
@@ -22,7 +22,7 @@ The RTaaS side already treats the `killSwitchArmed` heartbeat flag as a chip-onl
 
 ## User contract
 
-- If you're a Linux student, nothing changes vs the v1.4.0 spec: run `arena-byoc`, chip flips to `PROTECTED`.
+- If you're a Linux student, nothing changes vs the v1.4.0 spec: run `arena-tunnel`, chip flips to `PROTECTED`.
 - If you're a Windows student, the tunnel comes up (winipcfg-driven — v1.3.0 parity restored) and the chip shows `TUNNEL_UP`. You are **not** kill-switched. If your tunnel drops mid-session, traffic falls back to your local ISP → the scenario target sees your real IP until you reconnect.
 - If you explicitly pass `-kill-switch=true` on Windows: the switch's elevation guard runs the flip, verifies the profile, and hard-errors if the process is MEDIUM integrity. No silent partial arming.
 

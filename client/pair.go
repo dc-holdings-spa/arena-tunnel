@@ -1,4 +1,4 @@
-// pair.go — Tailscale-style browser pairing for arena-byoc.
+// pair.go — Tailscale-style browser pairing for arena-tunnel.
 //
 // Flow:
 //   1. Generate a 6-char human-friendly code (Crockford-ish alphabet,
@@ -134,7 +134,7 @@ func userAgent(ver string) string {
 	if ver == "" {
 		ver = "dev"
 	}
-	return fmt.Sprintf("arena-byoc/%s (%s/%s)", ver, runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("arena-tunnel/%s (%s/%s)", ver, runtime.GOOS, runtime.GOARCH)
 }
 
 // doJSON is a tiny helper for "POST JSON, get JSON or status code".
