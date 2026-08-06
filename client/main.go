@@ -482,15 +482,20 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 			return code
 		}
 		cfg := &Config{
-			Version:      ConfigSchemaVersion,
-			TunnelIP:     claimed.TunnelIP,
-			PrivateKey:   claimed.PrivateKey,
-			ServerPubKey: claimed.ServerPubKey,
-			ServerHost:   claimed.ServerHost,
-			UserEmail:    claimed.UserEmail,
-			PairedAt:     time.Now().UTC().Format(time.RFC3339),
-			ArenaBaseURL: rf.arena,
-			DeviceID:     claimed.DeviceID,
+			Version:         ConfigSchemaVersion,
+			TunnelIP:        claimed.TunnelIP,
+			PrivateKey:      claimed.PrivateKey,
+			ServerPubKey:    claimed.ServerPubKey,
+			ServerHost:      claimed.ServerHost,
+			UserEmail:       claimed.UserEmail,
+			PairedAt:        time.Now().UTC().Format(time.RFC3339),
+			ArenaBaseURL:    rf.arena,
+			DeviceID:        claimed.DeviceID,
+			// Without this the shovel dials WS with no X-Arena-Token
+			// header, the tunnel server can't call peer-event, and the
+			// dashboard chip is stuck on OFFLINE forever. Interactive
+			// pair.go:531 already sets this; headless was the outlier.
+			RevocationToken: claimed.RevocationToken,
 		}
 		if err := SaveConfig(path, cfg); err != nil {
 			log.Printf("[config] save: %v (tunnel will still start)", err)
