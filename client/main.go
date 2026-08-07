@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"sync"
@@ -241,19 +242,39 @@ var pushRoutes = []string{
 // Returns true when the lock was acquired (caller must call releasePIDLock on
 // clean exit). On false the process should exit — either another instance is
 // running, or we failed to write the file.
+//
+// Iterative with a hard retry cap (5). Two failure modes forced this rewrite
+// away from the previous self-recursive implementation:
+//   1. Two processes racing at startup could both see the file exist, both
+//      remove it, both self-call, both re-see it recreated by the peer, and
+//      recurse forever. Diego 2026-08-07: a stray `arena-tunnel` typed at a
+//      shell (with systemd already holding the lock) printed thousands of
+//      "stale lock file (dead process) — removing and continuing" lines
+//      before the terminal filled.
+//   2. A pathological filesystem where O_EXCL keeps failing but Remove keeps
+//      returning nil — the old code recursed until the goroutine stack blew.
+// A 5-attempt ceiling with a short sleep between tries covers the honest
+// TOCTOU race without ever burning the CPU.
 func acquirePIDLock() bool {
-	f, err := os.OpenFile(pidFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
+	const maxAttempts = 5
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		f, err := os.OpenFile(pidFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			defer f.Close()
+			fmt.Fprintf(f, "%d\n", os.Getpid())
+			return true
+		}
 		if !os.IsExist(err) {
 			log.Printf("[pid] could not create lock file %s: %v", pidFilePath, err)
 			return false
 		}
-		// File exists — check if that PID is still alive.
+		// File exists — check if the PID inside is still alive.
 		raw, rerr := os.ReadFile(pidFilePath)
 		if rerr != nil {
-			log.Printf("[pid] stale/unreadable lock file — removing and continuing")
+			log.Printf("[pid] stale/unreadable lock file — removing (attempt %d/%d)", attempt, maxAttempts)
 			_ = os.Remove(pidFilePath)
-			return acquirePIDLock()
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
 		var pid int
 		if _, serr := fmt.Sscan(string(raw), &pid); serr == nil && pid > 0 {
@@ -262,13 +283,12 @@ func acquirePIDLock() bool {
 				return false
 			}
 		}
-		log.Printf("[pid] stale lock file (dead process) — removing and continuing")
+		log.Printf("[pid] stale lock file (dead process) — removing (attempt %d/%d)", attempt, maxAttempts)
 		_ = os.Remove(pidFilePath)
-		return acquirePIDLock()
+		time.Sleep(100 * time.Millisecond)
 	}
-	defer f.Close()
-	fmt.Fprintf(f, "%d\n", os.Getpid())
-	return true
+	log.Printf("[pid] could not acquire lock after %d attempts — another instance may be racing", maxAttempts)
+	return false
 }
 
 func releasePIDLock() {
@@ -768,8 +788,52 @@ func runLogout(ctx context.Context, rf *rootFlags) int {
 		fmt.Fprintf(os.Stderr, "[logout] could not wipe %s: %v\n", path, err)
 		return ExitConfigUnlinkFailed
 	}
+
+	// Tear down anything install.sh left behind: the systemd unit that
+	// would otherwise resurrect the tunnel on next boot with a wiped
+	// config (loop of pair-request codes), plus the ARENA_KILLSWITCH
+	// iptables chain that would keep dropping scenario-CIDR packets
+	// forever. Best-effort — a manual install without systemd or a
+	// non-Linux host is a no-op. Detected 2026-08-07 (Diego): logout
+	// left both zombies in place.
+	teardownInstallLeftovers()
+
 	fmt.Println("Logged out. Config wiped.")
 	return ExitOK
+}
+
+// teardownInstallLeftovers removes the arena-tunnel.service unit and
+// the ARENA_KILLSWITCH iptables chain that install.sh drops. Errors are
+// logged but never fatal — logout must always succeed on the config
+// side even if elevation is missing here.
+func teardownInstallLeftovers() {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	unit := "/etc/systemd/system/arena-tunnel.service"
+
+	// systemd unit — stop, disable, remove file, reload.
+	if _, err := os.Stat(unit); err == nil {
+		if err := exec.Command("systemctl", "stop", "arena-tunnel.service").Run(); err != nil {
+			log.Printf("[logout] systemctl stop failed: %v", err)
+		}
+		if err := exec.Command("systemctl", "disable", "arena-tunnel.service").Run(); err != nil {
+			log.Printf("[logout] systemctl disable failed: %v", err)
+		}
+		if err := os.Remove(unit); err != nil {
+			log.Printf("[logout] remove %s failed: %v", unit, err)
+		}
+		if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+			log.Printf("[logout] systemctl daemon-reload failed: %v", err)
+		}
+	}
+
+	// Kill switch chain — reuse the existing idempotent teardown that
+	// runs at startup after a hard crash. Same behaviour whether the
+	// chain is armed or already gone.
+	if err := teardownKillSwitch(); err != nil {
+		log.Printf("[logout] teardownKillSwitch failed: %v", err)
+	}
 }
 
 // bestEffortRevoke posts the peer pubkey to /api/byoc2/peer/revoke.
