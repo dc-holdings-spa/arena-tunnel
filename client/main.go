@@ -117,13 +117,27 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// gorilla/websocket allows exactly one concurrent writer per connection.
+	// This tunnel has THREE goroutines that write to ws: the ping handler
+	// callback (sends PONG), the client-side keepalive ticker (sends PING),
+	// and the UDP→WSS shovel (sends BINARY). Without serialization gorilla
+	// panics `concurrent write to websocket connection` — seen in prod on
+	// Diego's laptop 2026-08-07 22:54:04. Wrap every write through
+	// writeWS which owns the sole write critical section + write deadline.
+	var writeMu sync.Mutex
+	writeWS := func(mt int, payload []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return ws.WriteMessage(mt, payload)
+	}
+
 	// The server sends pings every 30 s; we must respond with pong (gorilla
 	// does this automatically) AND reset our own read deadline so we don't
 	// time out while the server is silently healthy.
 	ws.SetPingHandler(func(data string) error {
 		_ = ws.SetReadDeadline(time.Now().Add(wssReadTimeout))
-		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		return ws.WriteMessage(websocket.PongMessage, []byte(data))
+		return writeWS(websocket.PongMessage, []byte(data))
 	})
 	// Also reset on pong in case both sides happen to ping simultaneously.
 	ws.SetPongHandler(func(string) error {
@@ -140,8 +154,7 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 		for {
 			select {
 			case <-ticker.C:
-				_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+				if err := writeWS(websocket.PingMessage, nil); err != nil {
 					return
 				}
 			case <-subCtx.Done():
@@ -171,8 +184,7 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 				default:
 				}
 			}
-			ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+			if err := writeWS(websocket.BinaryMessage, buf[:n]); err != nil {
 				// Suppress noise when the connection was closed intentionally
 				// (e.g. Cloudflare 300s hard-reset → reconnect in progress).
 				if subCtx.Err() == nil {
