@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [v1.2.0] — 2026-10-21
+
 ### Changed
 
 - Arena clients now consume a versioned owner-scoped network profile, reconcile
