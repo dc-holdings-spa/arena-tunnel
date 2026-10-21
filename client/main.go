@@ -257,14 +257,15 @@ var pushRoutes = []string{
 //
 // Iterative with a hard retry cap (5). Two failure modes forced this rewrite
 // away from the previous self-recursive implementation:
-//   1. Two processes racing at startup could both see the file exist, both
-//      remove it, both self-call, both re-see it recreated by the peer, and
-//      recurse forever. Diego 2026-08-07: a stray `arena-tunnel` typed at a
-//      shell (with systemd already holding the lock) printed thousands of
-//      "stale lock file (dead process) — removing and continuing" lines
-//      before the terminal filled.
-//   2. A pathological filesystem where O_EXCL keeps failing but Remove keeps
-//      returning nil — the old code recursed until the goroutine stack blew.
+//  1. Two processes racing at startup could both see the file exist, both
+//     remove it, both self-call, both re-see it recreated by the peer, and
+//     recurse forever. Diego 2026-08-07: a stray `arena-tunnel` typed at a
+//     shell (with systemd already holding the lock) printed thousands of
+//     "stale lock file (dead process) — removing and continuing" lines
+//     before the terminal filled.
+//  2. A pathological filesystem where O_EXCL keeps failing but Remove keeps
+//     returning nil — the old code recursed until the goroutine stack blew.
+//
 // A 5-attempt ceiling with a short sleep between tries covers the honest
 // TOCTOU race without ever burning the CPU.
 func acquirePIDLock() bool {
@@ -514,15 +515,15 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 			return code
 		}
 		cfg := &Config{
-			Version:         ConfigSchemaVersion,
-			TunnelIP:        claimed.TunnelIP,
-			PrivateKey:      claimed.PrivateKey,
-			ServerPubKey:    claimed.ServerPubKey,
-			ServerHost:      claimed.ServerHost,
-			UserEmail:       claimed.UserEmail,
-			PairedAt:        time.Now().UTC().Format(time.RFC3339),
-			ArenaBaseURL:    rf.arena,
-			DeviceID:        claimed.DeviceID,
+			Version:      ConfigSchemaVersion,
+			TunnelIP:     claimed.TunnelIP,
+			PrivateKey:   claimed.PrivateKey,
+			ServerPubKey: claimed.ServerPubKey,
+			ServerHost:   claimed.ServerHost,
+			UserEmail:    claimed.UserEmail,
+			PairedAt:     time.Now().UTC().Format(time.RFC3339),
+			ArenaBaseURL: rf.arena,
+			DeviceID:     claimed.DeviceID,
 			// Without this the shovel dials WS with no X-Arena-Token
 			// header, the tunnel server can't call peer-event, and the
 			// dashboard chip is stuck on OFFLINE forever. Interactive
