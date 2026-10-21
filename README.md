@@ -45,6 +45,12 @@ arena-tunnel (client)                                            arena-tunnel-se
 
 In Adversario Arena, `arena-manager` (the control plane) manages peer lifecycle via an OPNsense WireGuard API + a local `wg-byoc` interface. A browser-based pairing flow issues per-student credentials so students never handle raw keys. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
+Arena deployments are fail-closed: the client fetches a signed-in,
+owner-scoped network profile and installs only the student's active scenario
+VLANs, owned TeamServer `/32`, and Arena DNS resolver. It never installs the
+historical broad `10.128.0.0/9` route. Linux clients require active
+`systemd-resolved`/`resolvectl`; Windows uses the native Wintun interface APIs.
+
 ## Quick start — Arena students
 
 Download the latest `arena-tunnel` binary from [Releases](https://github.com/dc-holdings-spa/arena-tunnel/releases), then:

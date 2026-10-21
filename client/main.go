@@ -75,14 +75,33 @@ func b64ToHex(b64 string) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-func runShovel(ctx context.Context, udpConn *net.UDPConn, wsURL string, arenaToken string) {
+func runShovel(
+	ctx context.Context,
+	udpConn *net.UDPConn,
+	wsURL string,
+	arenaToken string,
+	connected chan<- struct{},
+	dialAddress string,
+) {
 	var wsHeaders http.Header
 	if arenaToken != "" {
 		wsHeaders = http.Header{"X-Arena-Token": {arenaToken}}
 	}
 	for ctx.Err() == nil {
-		dialer := websocket.DefaultDialer
+		dialer := *websocket.DefaultDialer
 		dialer.HandshakeTimeout = 15 * time.Second
+		if dialAddress != "" {
+			defaultDialer := &net.Dialer{Timeout: 15 * time.Second}
+			parsedWSS, _ := url.Parse(wsURL)
+			targetHost := parsedWSS.Hostname()
+			dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+				addressHost := (&url.URL{Host: address}).Hostname()
+				if addressHost == targetHost {
+					return defaultDialer.DialContext(dialCtx, network, dialAddress)
+				}
+				return defaultDialer.DialContext(dialCtx, network, address)
+			}
+		}
 		log.Printf("[wss] dialing %s", wsURL)
 		ws, resp, err := dialer.Dial(wsURL, wsHeaders)
 		if err != nil {
@@ -99,9 +118,39 @@ func runShovel(ctx context.Context, udpConn *net.UDPConn, wsURL string, arenaTok
 			continue
 		}
 		log.Printf("[wss] connected")
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
 		runOneTunnel(ctx, udpConn, ws)
 		log.Printf("[wss] connection closed — reconnecting")
 	}
+}
+
+func resolveWSSDialAddress(ctx context.Context, host string) (string, error) {
+	hostname := (&url.URL{Host: host}).Hostname()
+	port := (&url.URL{Host: host}).Port()
+	if hostname == "" {
+		return "", fmt.Errorf("invalid WSS host %q", host)
+	}
+	if port == "" {
+		port = "443"
+	}
+	if parsed := net.ParseIP(hostname); parsed != nil {
+		return net.JoinHostPort(hostname, port), nil
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	addresses, err := net.DefaultResolver.LookupIPAddr(lookupCtx, hostname)
+	if err != nil {
+		return "", fmt.Errorf("resolve WSS endpoint %s: %w", hostname, err)
+	}
+	for _, address := range addresses {
+		if ipv4 := address.IP.To4(); ipv4 != nil {
+			return net.JoinHostPort(ipv4.String(), port), nil
+		}
+	}
+	return "", fmt.Errorf("WSS endpoint %s has no IPv4 address", hostname)
 }
 
 // wssReadTimeout is how long we wait for any inbound frame (data or pong)
@@ -227,14 +276,6 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 	}()
 
 	<-subCtx.Done()
-}
-
-// Routes pushed through the tunnel automatically. Covers the entire
-// scenario VLAN supernet (10.128.0.0/9) so students can reach every
-// scenario without remembering to add routes by hand. The tunnel
-// network (10.201.0.0/16) is implicit from the address assignment.
-var pushRoutes = []string{
-	"10.128.0.0/9",
 }
 
 // configureTUN and teardownTUN are implemented per-OS in
@@ -607,6 +648,11 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		log.Printf("[connect] missing creds (priv/pub/ip)")
 		return ExitFatalRuntime
 	}
+	profile, err := fetchNetworkProfile(ctx, cfg)
+	if err != nil {
+		log.Printf("[network-profile] %v", err)
+		return ExitFatalRuntime
+	}
 	host := cfg.ServerHost
 	if host == "" {
 		host = serverHost // package default ("wg-byoc.adversario.cl")
@@ -671,14 +717,15 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		return ExitFatalRuntime
 	}
 
-	if err := configureTUN(tdev, cfg.TunnelIP); err != nil {
+	if err := configureTUN(tdev, cfg.TunnelIP, profile); err != nil {
 		log.Printf("[tun] config: %v", err)
 		udpConn.Close()
 		dev.Close()
 		tdev.Close()
 		return ExitFatalRuntime
 	}
-	defer teardownTUN(tdev)
+	var profileMu sync.Mutex
+	currentProfile := profile
 
 	// Kill switch — arm AFTER the tunnel is up so a botched install
 	// can't strand the user with a blocked internet and no way back in.
@@ -701,6 +748,48 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 		}
 	}
 
+	shovelCtx, cancel := context.WithCancel(ctx)
+	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
+	dialAddress, err := resolveWSSDialAddress(shovelCtx, host)
+	if err != nil {
+		log.Printf("[wss] %v", err)
+		cancel()
+		teardownTUN(tdev, profile)
+		udpConn.Close()
+		dev.Close()
+		tdev.Close()
+		return ExitFatalRuntime
+	}
+	connected := make(chan struct{}, 1)
+	go runShovel(shovelCtx, udpConn, wsURL, cfg.RevocationToken, connected, dialAddress)
+	select {
+	case <-connected:
+		if err := configureTunnelDNS(tdev, profile); err != nil {
+			log.Printf("[dns] config: %v", err)
+			cancel()
+			teardownTUN(tdev, profile)
+			udpConn.Close()
+			dev.Close()
+			tdev.Close()
+			return ExitFatalRuntime
+		}
+	case <-time.After(20 * time.Second):
+		log.Printf("[wss] initial connection timed out; DNS was not changed")
+		cancel()
+		teardownTUN(tdev, profile)
+		udpConn.Close()
+		dev.Close()
+		tdev.Close()
+		return ExitFatalRuntime
+	case <-ctx.Done():
+		cancel()
+		teardownTUN(tdev, profile)
+		udpConn.Close()
+		dev.Close()
+		tdev.Close()
+		return ExitOK
+	}
+
 	// Kill-switch heartbeat: report armed state to the RTaaS server
 	// every 60s so the dashboard chip renders PROTECTED / UNPROTECTED
 	// honestly. Fires whether or not the switch is armed — the server
@@ -719,12 +808,9 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 
 	printC2Banner(ctx, cfg)
 
-	shovelCtx, cancel := context.WithCancel(ctx)
-	wsURL := (&url.URL{Scheme: "wss", Host: host, Path: "/tunnel"}).String()
-	go runShovel(shovelCtx, udpConn, wsURL, cfg.RevocationToken)
-
 	// Poll /api/users/me/c2-state every 60 s with the revocationToken Bearer.
-	// Two jobs in one call:
+	// Control-plane polling keeps liveness, revocation, updates and the
+	// owner-scoped network profile converged while the tunnel is running:
 	//   1. Bumps Byoc2Peer.lastCliFetchAt so the dashboard shows LIVE (not OFFLINE).
 	//   2. Detects server-side revocation — if byoc2.status == "revoked", exit.
 	//   3. Emits a one-time update nudge when latestBinaryVersion > version.
@@ -752,6 +838,21 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 						cancel()
 						return
 					}
+					nextProfile, profileErr := fetchNetworkProfile(shovelCtx, cfg)
+					if profileErr != nil {
+						log.Printf("[network-profile] refresh failed; retaining last safe profile: %v", profileErr)
+						continue
+					}
+					profileMu.Lock()
+					if !networkProfilesEqual(currentProfile, nextProfile) {
+						if err := reconcileTUN(tdev, currentProfile, nextProfile); err != nil {
+							log.Printf("[network-profile] reconcile failed; retaining last profile: %v", err)
+						} else {
+							currentProfile = nextProfile
+							log.Printf("[network-profile] applied %d exact routes", len(nextProfile.Routes))
+						}
+					}
+					profileMu.Unlock()
 				case <-shovelCtx.Done():
 					return
 				}
@@ -762,6 +863,9 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 	<-shovelCtx.Done()
 	log.Println("[!] shutdown requested")
 	cancel()
+	profileMu.Lock()
+	teardownTUN(tdev, currentProfile)
+	profileMu.Unlock()
 	dev.Close()
 	tdev.Close()
 	udpConn.Close()

@@ -24,11 +24,11 @@ Explicit non-goals: kernel-level performance, multi-tenant on a single tunnel, r
                                                          UDP → wg-byoc (WireGuard iface)
                                                                │
                                                                ▼
-                                                         route 10.128.0.0/9
+                                                         exact owner routes
                                                                │
                                                                ▼
-                                                         OPNsense → scenario VMs
-                                                         (10.128.x.x / 10.130.x.x)
+                                                         OPNsense → enrolled scenario,
+                                                         owned TeamServer + DNS only
 
   Control plane (arena-manager)
   ────────────────────────────
@@ -67,7 +67,8 @@ sudo arena-tunnel
   └─ saves config (0600)
   └─ runConnect() → WG up + WSS shovel
   └─ fetches /api/users/me/c2-state (Bearer revocationToken)
-  └─ prints connection banner (edge IP, SNI, HMAC cookie)
+  └─ validates and applies owner-scoped routes + Arena DNS
+  └─ prints Remote Operator connection banner
 ```
 
 The poll endpoint blocks at 202 until `Byoc2Peer.opnsenseSyncState = 'active'`. This ensures the WireGuard server knows the peer's public key before the client sends its first handshake — otherwise the handshake is silently dropped.
@@ -140,9 +141,17 @@ Each new WS connection gets a fresh `net.DialUDP` to `wg-byoc`. This gives **eac
 │  peers managed by arena-manager via opnsense-saga.ts        │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
-                  OPNsense firewall → scenario VMs
-                  (10.128.0.0/9 supernet)
+                  default-deny host + OPNsense firewall
+                  ├─ exact VLAN CIDRs of active enrollments
+                  ├─ owned Adaptix TeamServer /32:4321
+                  └─ Arena Unbound 10.130.50.254/32:53
 ```
+
+The client does not carry a static private-network supernet. It accepts only a
+versioned profile from Arena and rejects routes outside `10.128.0.0/16`, a
+single managed TeamServer `/32`, or the approved resolver `/32`. The profile is
+reconciled while connected and withdrawn on exit. Windows uses `winipcfg` for
+routes and DNS; Linux uses `iproute2` plus `systemd-resolved`/`resolvectl`.
 
 ## Why these technologies
 
