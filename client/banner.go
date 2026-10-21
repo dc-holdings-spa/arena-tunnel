@@ -28,10 +28,25 @@ type c2StateSlotView struct {
 	} `json:"listenerConfig"`
 }
 
-// fetchC2Slot calls /api/users/me/c2-state with the stored revocation token
-// and returns the byoc2 sub-object. Returns nil when unavailable (no token,
-// unreachable server, revoked peer) — callers treat nil as "no banner".
-func fetchC2Slot(ctx context.Context, cfg *Config) *c2StateSlotView {
+type c2StateView struct {
+	Mode    string `json:"mode"`
+	Managed *struct {
+		C2 *struct {
+			IPAddress string `json:"ipAddress"`
+			Framework string `json:"framework"`
+			Status    string `json:"status"`
+		} `json:"c2"`
+		Operator *struct {
+			ID string `json:"id"`
+		} `json:"operator"`
+	} `json:"managed"`
+	Byoc2 *c2StateSlotView `json:"byoc2"`
+}
+
+// fetchC2State calls /api/users/me/c2-state with the stored revocation token
+// and returns the managed + tunnel subsets needed by the banner. It returns
+// nil when unavailable; callers treat that as a non-fatal "no banner" state.
+func fetchC2State(ctx context.Context, cfg *Config) *c2StateView {
 	if cfg.ArenaBaseURL == "" || cfg.RevocationToken == "" {
 		return nil
 	}
@@ -56,13 +71,14 @@ func fetchC2Slot(ctx context.Context, cfg *Config) *c2StateSlotView {
 		return nil
 	}
 	defer resp.Body.Close()
-	var body struct {
-		Byoc2 *c2StateSlotView `json:"byoc2"`
-	}
+	var body c2StateView
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil
 	}
-	return body.Byoc2
+	if body.Byoc2 == nil {
+		return nil
+	}
+	return &body
 }
 
 const bannerWidth = 62
@@ -87,13 +103,11 @@ func bannerSep() string {
 	return "├" + strings.Repeat("─", bannerWidth) + "┤"
 }
 
-// printC2Banner fetches slot info from the arena API and prints a formatted
-// connection summary to stdout. Non-fatal — if the fetch fails we skip silently.
-func printC2Banner(ctx context.Context, cfg *Config) {
-	slot := fetchC2Slot(ctx, cfg)
-	if slot == nil {
-		return
+func renderC2Banner(state *c2StateView) string {
+	if state == nil || state.Byoc2 == nil {
+		return ""
 	}
+	slot := state.Byoc2
 
 	var edgeIp, sniHost string
 	for _, s := range slot.RedirectorSlots {
@@ -112,31 +126,56 @@ func printC2Banner(ctx context.Context, cfg *Config) {
 	top := "┌" + strings.Repeat("─", bannerWidth) + "┐"
 	bot := "└" + strings.Repeat("─", bannerWidth) + "┘"
 
-	fmt.Println()
-	fmt.Println(top)
-	fmt.Println(bannerFull("ARENA BYOC2 // SLOT ACTIVO"))
-	fmt.Println(bannerSep())
-	fmt.Println(bannerLine("TUNNEL IP", slot.TunnelIp))
-	if edgeIp != "" {
-		fmt.Println(bannerLine("EDGE IP", edgeIp))
+	remoteOperator := state.Managed != nil &&
+		state.Managed.C2 != nil &&
+		strings.EqualFold(state.Managed.C2.Framework, "adaptix") &&
+		state.Managed.Operator == nil
+
+	var out strings.Builder
+	fmt.Fprintln(&out, top)
+	if remoteOperator {
+		fmt.Fprintln(&out, bannerFull("ARENA // REMOTE OPERATOR"))
+	} else {
+		fmt.Fprintln(&out, bannerFull("ARENA TUNNEL // PEER ACTIVO"))
 	}
-	if slot.ListenerConfig != nil {
-		fmt.Println(bannerSep())
-		fmt.Println(bannerFull("// LISTENER CONFIG"))
-		fmt.Println(bannerLine("BIND IP", slot.ListenerConfig.BindIp))
-		fmt.Println(bannerLine("PORT", fmt.Sprintf("%d", slot.ListenerConfig.BindPort)))
+	fmt.Fprintln(&out, bannerSep())
+	fmt.Fprintln(&out, bannerLine("TUNNEL IP", slot.TunnelIp))
+	if remoteOperator {
+		teamserverIP := strings.Split(state.Managed.C2.IPAddress, "/")[0]
+		fmt.Fprintln(&out, bannerSep())
+		fmt.Fprintln(&out, bannerFull("// ADAPTIX TEAMSERVER ADMINISTRADO"))
+		fmt.Fprintln(&out, bannerLine("CONTROL", teamserverIP+":4321/adaptix-ts"))
+		fmt.Fprintln(&out, bannerLine("LISTENER", "arena-https (Arena)"))
+	}
+	if edgeIp != "" {
+		fmt.Fprintln(&out, bannerLine("EDGE IP", edgeIp))
+	}
+	if !remoteOperator && slot.ListenerConfig != nil {
+		fmt.Fprintln(&out, bannerSep())
+		fmt.Fprintln(&out, bannerFull("// LISTENER CONFIG"))
+		fmt.Fprintln(&out, bannerLine("BIND IP", slot.ListenerConfig.BindIp))
+		fmt.Fprintln(&out, bannerLine("PORT", fmt.Sprintf("%d", slot.ListenerConfig.BindPort)))
 	}
 	if sniHost != "" {
-		fmt.Println(bannerSep())
-		fmt.Println(bannerFull("// SNI / COBERTURA"))
-		fmt.Println(bannerFull(sniHost))
+		fmt.Fprintln(&out, bannerSep())
+		fmt.Fprintln(&out, bannerFull("// SNI / COBERTURA"))
+		fmt.Fprintln(&out, bannerFull(sniHost))
 	}
-	if slot.ListenerConfig != nil && slot.ListenerConfig.HmacCookieName != "" {
-		fmt.Println(bannerSep())
-		fmt.Println(bannerFull("// HMAC COOKIE"))
-		fmt.Println(bannerLine("nombre", slot.ListenerConfig.HmacCookieName))
-		fmt.Println(bannerLine("valor", slot.ListenerConfig.HmacCookieValue))
+	if !remoteOperator && slot.ListenerConfig != nil && slot.ListenerConfig.HmacCookieName != "" {
+		fmt.Fprintln(&out, bannerSep())
+		fmt.Fprintln(&out, bannerFull("// HMAC COOKIE"))
+		fmt.Fprintln(&out, bannerLine("nombre", slot.ListenerConfig.HmacCookieName))
+		fmt.Fprintln(&out, bannerLine("valor", slot.ListenerConfig.HmacCookieValue))
 	}
-	fmt.Println(bot)
-	fmt.Println()
+	fmt.Fprintln(&out, bot)
+	return out.String()
+}
+
+// printC2Banner fetches slot info from the arena API and prints a formatted
+// connection summary to stdout. Non-fatal — if the fetch fails we skip silently.
+func printC2Banner(ctx context.Context, cfg *Config) {
+	state := fetchC2State(ctx, cfg)
+	if rendered := renderC2Banner(state); rendered != "" {
+		fmt.Printf("\n%s\n", rendered)
+	}
 }
