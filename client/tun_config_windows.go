@@ -24,7 +24,7 @@ import (
 // The /16 mask mirrors the Linux impl: the tunnel pool (10.201.0.0/16)
 // is on-link, so the server gateway 10.201.0.1 is reachable no matter
 // which /24 the client landed in.
-func configureTUN(tdev tun.Device, ipStr string) error {
+func configureTUN(tdev tun.Device, ipStr string, profile *networkProfile) error {
 	nt, ok := tdev.(*tun.NativeTun)
 	if !ok {
 		return fmt.Errorf("configureTUN: expected *tun.NativeTun, got %T", tdev)
@@ -36,8 +36,8 @@ func configureTUN(tdev tun.Device, ipStr string) error {
 		return fmt.Errorf("parse tunnel ip %q: %w", ipStr, err)
 	}
 	prefix := netip.PrefixFrom(ip, 16)
-	routes := make([]*winipcfg.RouteData, 0, len(pushRoutes))
-	for _, r := range pushRoutes {
+	routes := make([]*winipcfg.RouteData, 0, len(profile.Routes))
+	for _, r := range networkProfileRouteCIDRs(profile) {
 		p, err := netip.ParsePrefix(r)
 		if err != nil {
 			log.Printf("[route] skip bad prefix %s: %v", r, err)
@@ -137,22 +137,76 @@ retryLoop:
 		return fmt.Errorf("configure interface: %w", configErr)
 	}
 
-	for _, r := range pushRoutes {
+	for _, r := range networkProfileRouteCIDRs(profile) {
 		log.Printf("[route] %s via %s", r, tunnelName)
 	}
 	return nil
+}
+
+func configureTunnelDNS(tdev tun.Device, profile *networkProfile) error {
+	nt, ok := tdev.(*tun.NativeTun)
+	if !ok {
+		return fmt.Errorf("configureTunnelDNS: expected *tun.NativeTun, got %T", tdev)
+	}
+	return setWindowsDNS(winipcfg.LUID(nt.LUID()), profile)
+}
+
+func setWindowsDNS(luid winipcfg.LUID, profile *networkProfile) error {
+	servers := make([]netip.Addr, 0, len(profile.DNS.Servers))
+	for _, raw := range profile.DNS.Servers {
+		server, err := netip.ParseAddr(raw)
+		if err != nil || !server.Is4() {
+			return fmt.Errorf("parse DNS server %q: %w", raw, err)
+		}
+		servers = append(servers, server)
+	}
+	if err := luid.SetDNS(windows.AF_INET, servers, nil); err != nil {
+		return fmt.Errorf("set Arena DNS: %w", err)
+	}
+	return nil
+}
+
+func reconcileTUN(tdev tun.Device, previous, next *networkProfile) error {
+	nt, ok := tdev.(*tun.NativeTun)
+	if !ok {
+		return fmt.Errorf("reconcileTUN: expected *tun.NativeTun, got %T", tdev)
+	}
+	luid := winipcfg.LUID(nt.LUID())
+	previousRoutes := networkRouteSet(previous)
+	nextRoutes := networkRouteSet(next)
+	unspecified := netip.IPv4Unspecified()
+	for raw := range previousRoutes {
+		if _, keep := nextRoutes[raw]; keep {
+			continue
+		}
+		prefix := netip.MustParsePrefix(raw)
+		if err := luid.DeleteRoute(prefix, unspecified); err != nil && err != windows.ERROR_NOT_FOUND {
+			log.Printf("[route] failed to withdraw %s: %v", raw, err)
+		}
+	}
+	for raw := range nextRoutes {
+		if _, exists := previousRoutes[raw]; exists {
+			continue
+		}
+		prefix := netip.MustParsePrefix(raw)
+		if err := luid.AddRoute(prefix, unspecified, 0); err != nil && err != windows.ERROR_OBJECT_ALREADY_EXISTS {
+			return fmt.Errorf("add route %s: %w", raw, err)
+		}
+	}
+	return setWindowsDNS(luid, next)
 }
 
 // teardownTUN flushes IPs + routes. Wintun tears the adapter down when
 // the owning process exits, so this is best-effort cleanup for the
 // long-running -no-browser path where the process may re-enter its
 // connect loop without exiting.
-func teardownTUN(tdev tun.Device) {
+func teardownTUN(tdev tun.Device, _ *networkProfile) {
 	nt, ok := tdev.(*tun.NativeTun)
 	if !ok {
 		return
 	}
 	luid := winipcfg.LUID(nt.LUID())
+	_ = luid.FlushDNS(windows.AF_INET)
 	_ = luid.FlushRoutes(windows.AF_INET)
 	_ = luid.FlushIPAddresses(windows.AF_INET)
 }

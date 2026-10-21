@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Arena clients now consume a versioned owner-scoped network profile, reconcile
+  enrollment route changes while connected, and configure/revert Arena DNS on
+  Windows and Linux.
+- Remote Operator reconnects reuse the pre-resolved WSS edge addresses so an
+  interrupted tunnel cannot deadlock on the DNS resolver carried inside it.
+
+### Security
+
+- Removed the static `10.128.0.0/9` client route. Profiles containing broad,
+  foreign, duplicate, non-canonical, or unapproved DNS routes fail closed.
+
 ## [v1.1.0] — 2026-06-25
 
 ### Added

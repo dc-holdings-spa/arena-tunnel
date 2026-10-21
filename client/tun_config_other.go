@@ -9,8 +9,12 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-func configureTUN(_ tun.Device, _ string) error {
+func configureTUN(_ tun.Device, _ string, _ *networkProfile) error {
 	return fmt.Errorf("interface config not implemented for %s (PR welcome)", runtime.GOOS)
 }
 
-func teardownTUN(_ tun.Device) {}
+func reconcileTUN(_ tun.Device, _, _ *networkProfile) error { return nil }
+
+func configureTunnelDNS(_ tun.Device, _ *networkProfile) error { return nil }
+
+func teardownTUN(_ tun.Device, _ *networkProfile) {}
