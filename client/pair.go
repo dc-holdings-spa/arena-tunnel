@@ -247,9 +247,9 @@ func pairPoll(ctx context.Context, c *http.Client, opts pairOptions, code string
 		// Per-request context so a slow server can't pin the whole poll loop.
 		reqCtx, cancel := context.WithTimeout(ctx, pollPerRequestTO)
 		resp, err := doJSON(reqCtx, c, http.MethodGet, pollURL, ua, nil)
-		cancel()
 
 		if err != nil {
+			cancel()
 			if isTransientNetErr(err) {
 				netFailures++
 				if netFailures >= pollNetMaxFailures {
@@ -270,6 +270,7 @@ func pairPoll(ctx context.Context, c *http.Client, opts pairOptions, code string
 			var out pairClaimedResponse
 			err := json.NewDecoder(resp.Body).Decode(&out)
 			resp.Body.Close()
+			cancel()
 			if err != nil {
 				return nil, ExitFatalRuntime, fmt.Errorf("pair/poll decode: %w", err)
 			}
@@ -282,6 +283,7 @@ func pairPoll(ctx context.Context, c *http.Client, opts pairOptions, code string
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&body)
 			resp.Body.Close()
+			cancel()
 			netFailures = 0
 			if body.Reason == "saga_running" {
 				fmt.Printf("\r  ⏳ Provisioning WireGuard peer (can take ~30s) …                    ")
@@ -293,15 +295,18 @@ func pairPoll(ctx context.Context, c *http.Client, opts pairOptions, code string
 
 		case http.StatusGone: // 410 — cancelled in browser
 			resp.Body.Close()
+			cancel()
 			return nil, ExitUserCancelled, errors.New("authorization cancelled in browser")
 
 		case http.StatusNotFound: // 404 — expired / never existed
 			resp.Body.Close()
+			cancel()
 			return nil, ExitExpiredOrNotFound, errors.New("pairing code expired or unknown; re-run to start over")
 
 		default:
 			if resp.StatusCode >= 500 && resp.StatusCode < 600 {
 				resp.Body.Close()
+				cancel()
 				netFailures++
 				if netFailures >= pollNetMaxFailures {
 					return nil, ExitNetworkBudgetExceeded,
@@ -315,6 +320,7 @@ func pairPoll(ctx context.Context, c *http.Client, opts pairOptions, code string
 			}
 			snippet := readSnippet(resp.Body, 256)
 			resp.Body.Close()
+			cancel()
 			return nil, ExitFatalRuntime, fmt.Errorf("pair/poll: unexpected HTTP %d: %s", resp.StatusCode, snippet)
 		}
 	}
