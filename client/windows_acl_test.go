@@ -4,23 +4,27 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
-// effectiveSDDL asks the OS itself for the SDDL of path via PowerShell —
-// independent of the x/sys version we build against, so the assertion
-// exercises the real on-disk ACL.
+// effectiveSDDL asks Windows for the security descriptor currently stored
+// on the filesystem. This exercises the real on-disk ACL without depending
+// on PowerShell modules or quoting paths through another interpreter.
 func effectiveSDDL(t *testing.T, path string) string {
 	t.Helper()
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"(Get-Acl -LiteralPath '"+path+"').Sddl").Output()
+	sd, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
 	if err != nil {
-		t.Fatalf("Get-Acl(%s): %v", path, err)
+		t.Fatalf("GetNamedSecurityInfo(%s): %v", path, err)
 	}
-	return strings.TrimSpace(string(out))
+	return sd.String()
 }
 
 // Audit (second round): prove the owner-only DACL on real Windows — the
