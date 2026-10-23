@@ -24,6 +24,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -37,14 +39,25 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// newSessionID returns a random, non-secret 8-hex id used to correlate
+// every log line of one WSS session (#2607 D0).
+func newSessionID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano()&0xffffffff)
+	}
+	return hex.EncodeToString(b[:])
+}
+
 var (
-	listenAddr   = flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
-	wgTarget     = flag.String("wg", "127.0.0.1:51820", "WireGuard server UDP target")
-	pingInterval = flag.Duration("ping-interval", 30*time.Second, "server→client WebSocket ping interval")
-	pongTimeout  = flag.Duration("pong-timeout", 90*time.Second, "WebSocket close if pong not received within N")
-	udpIdleLog   = flag.Duration("udp-idle-log", 5*time.Minute, "log a warning after N idle (no WG traffic); tunnel stays up")
-	maxAge       = flag.Duration("max-age", 24*time.Hour, "hard cap on tunnel lifetime regardless of health")
-	managerURL   = flag.String("manager-url", "", "arena-manager peer-event URL (optional, e.g. http://localhost:3000/api/internal/byoc2/peer-event)")
+	listenAddr    = flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
+	wgTarget      = flag.String("wg", "127.0.0.1:51820", "WireGuard server UDP target")
+	pingInterval  = flag.Duration("ping-interval", 30*time.Second, "server→client WebSocket ping interval")
+	pongTimeout   = flag.Duration("pong-timeout", 90*time.Second, "WebSocket close if pong not received within N")
+	udpIdleLog    = flag.Duration("udp-idle-log", 5*time.Minute, "log a warning after N idle (no WG traffic); tunnel stays up")
+	maxAge        = flag.Duration("max-age", 24*time.Hour, "hard cap on tunnel lifetime regardless of health")
+	managerURL    = flag.String("manager-url", "", "arena-manager peer-event URL (optional, e.g. http://localhost:3000/api/internal/byoc2/peer-event)")
+	statsInterval = flag.Duration("stats-interval", 60*time.Second, "sanitized per-session stats line interval")
 )
 
 // activeConns tracks open tunnel count for /healthz.
@@ -90,13 +103,18 @@ type tunnel struct {
 	udp        *net.UDPConn
 	clientIP   string
 	arenaToken string // from X-Arena-Token header; empty when not supplied
+	sessionID  string // random non-secret id for log correlation (#2607 D0)
 	openedAt   time.Time
 	once       sync.Once
 	done       chan struct{}
 
-	// stats — updated atomically, read by /healthz handler.
-	bytesWGIn  atomic.Int64 // client→WG (WS→UDP direction)
-	bytesWGOut atomic.Int64 // WG→client (UDP→WS direction)
+	// stats — updated atomically, read by /healthz handler and the
+	// periodic stats line. frames* counted per direction so a session
+	// with bytes but no frames (or the reverse) is visible in logs.
+	bytesWGIn   atomic.Int64 // client→WG (WS→UDP direction)
+	bytesWGOut  atomic.Int64 // WG→client (UDP→WS direction)
+	framesWGIn  atomic.Int64
+	framesWGOut atomic.Int64
 }
 
 func newTunnel(ws *websocket.Conn, udp *net.UDPConn, clientIP, arenaToken string) *tunnel {
@@ -105,8 +123,34 @@ func newTunnel(ws *websocket.Conn, udp *net.UDPConn, clientIP, arenaToken string
 		udp:        udp,
 		clientIP:   clientIP,
 		arenaToken: arenaToken,
+		sessionID:  newSessionID(),
 		openedAt:   time.Now(),
 		done:       make(chan struct{}),
+	}
+}
+
+// statsLine renders one sanitized periodic/closing stats record.
+func (t *tunnel) statsLine(prefix string) string {
+	return fmt.Sprintf("%s session=%s client=%s age=%s ws→udp frames=%d bytes=%d udp→ws frames=%d bytes=%d",
+		prefix, t.sessionID, t.clientIP,
+		time.Since(t.openedAt).Round(time.Second),
+		t.framesWGIn.Load(), t.bytesWGIn.Load(),
+		t.framesWGOut.Load(), t.bytesWGOut.Load(),
+	)
+}
+
+// statsLoop emits a sanitized stats line every statsInterval so a slow
+// data-plane recovery is visible while it happens, not only at close.
+func (t *tunnel) statsLoop() {
+	ticker := time.NewTicker(*statsInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			log.Print(t.statsLine("[stats]"))
+		case <-t.done:
+			return
+		}
 	}
 }
 
@@ -116,12 +160,7 @@ func (t *tunnel) close() {
 		_ = t.udp.Close()
 		_ = t.ws.Close()
 		activeConns.Add(-1)
-		log.Printf("[-] tunnel close client=%s duration=%s in=%d out=%d",
-			t.clientIP,
-			time.Since(t.openedAt).Round(time.Second),
-			t.bytesWGIn.Load(),
-			t.bytesWGOut.Load(),
-		)
+		log.Print(t.statsLine("[-] tunnel close"))
 		go notifyManager("disconnected", t.arenaToken)
 	})
 }
@@ -185,10 +224,11 @@ func (t *tunnel) wsToUDP() {
 			continue
 		}
 		if _, err := t.udp.Write(data); err != nil {
-			log.Printf("[ws→udp] udp write client=%s: %v", t.clientIP, err)
+			log.Printf("[ws→udp] udp write session=%s client=%s: %v", t.sessionID, t.clientIP, err)
 			return
 		}
 		t.bytesWGIn.Add(int64(len(data)))
+		t.framesWGIn.Add(1)
 	}
 }
 
@@ -238,10 +278,11 @@ func (t *tunnel) udpToWS() {
 
 		_ = t.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if err := t.ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			log.Printf("[udp→ws] ws write client=%s: %v", t.clientIP, err)
+			log.Printf("[udp→ws] ws write session=%s client=%s: %v", t.sessionID, t.clientIP, err)
 			return
 		}
 		t.bytesWGOut.Add(int64(n))
+		t.framesWGOut.Add(1)
 	}
 }
 
@@ -273,12 +314,16 @@ func handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 	t := newTunnel(ws, udp, clientIP, arenaToken)
 	activeConns.Add(1)
-	log.Printf("[+] tunnel open client=%s wg=%s token=%v", clientIP, wgAddr, arenaToken != "")
+	// The UDP local port is what WireGuard learns as this session's peer
+	// endpoint — log it so a stale-endpoint association is diagnosable.
+	log.Printf("[+] tunnel open session=%s client=%s wg=%s udp_local=%s token=%v",
+		t.sessionID, clientIP, wgAddr, udp.LocalAddr(), arenaToken != "")
 	go notifyManager("connected", arenaToken)
 
 	go t.pingLoop()
 	go t.wsToUDP()
 	go t.udpToWS()
+	go t.statsLoop()
 
 	// Block until all goroutines have signalled done.
 	<-t.done
