@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -22,29 +21,56 @@ func TestNewSessionIDShapeAndUniqueness(t *testing.T) {
 	}
 }
 
-func TestMetricsDataPlaneStates(t *testing.T) {
+// Audit point 1: one frame counted exactly once, and the first-frame
+// signal derives from that same mutation.
+func TestMarkDownCountsExactlyOnceAndSignalsFirst(t *testing.T) {
+	m := &tunnelMetrics{}
+	if !m.markDown(10) {
+		t.Fatal("first markDown must report first=true")
+	}
+	if m.markDown(10) || m.markDown(10) {
+		t.Fatal("subsequent markDown must report first=false")
+	}
+	if m.framesDown.Load() != 3 || m.bytesDown.Load() != 30 {
+		t.Fatalf("counters = %d/%d, want 3/30", m.framesDown.Load(), m.bytesDown.Load())
+	}
+	if !m.markUp(5) || m.markUp(5) {
+		t.Fatal("markUp first-frame contract broken")
+	}
+	if m.framesUp.Load() != 2 || m.bytesUp.Load() != 10 {
+		t.Fatalf("up counters = %d/%d, want 2/10", m.framesUp.Load(), m.bytesUp.Load())
+	}
+}
+
+// Audit point 2: honest observed states; point 7: the 90 s bound flips
+// the state at the bound itself (polled every 5 s in production).
+func TestDataPlaneObservedStates(t *testing.T) {
 	m := &tunnelMetrics{}
 	now := time.Now()
 
-	if got := m.dataPlaneState(now, dataPlaneDegradedAfter); got != stateControlConnected {
+	if got := m.dataPlaneState(now); got != stateControlConnected {
 		t.Fatalf("fresh session = %q, want %q", got, stateControlConnected)
 	}
 
-	// First local WG packet: handshake state, not degraded before the bound.
 	m.markUp(120)
-	if got := m.dataPlaneState(now.Add(30*time.Second), dataPlaneDegradedAfter); got != stateWgHandshake {
-		t.Fatalf("up-only within bound = %q, want %q", got, stateWgHandshake)
+	if got := m.dataPlaneState(now.Add(89 * time.Second)); got != stateLocalWgPacketSeen {
+		t.Fatalf("up-only at 89s = %q, want %q", got, stateLocalWgPacketSeen)
 	}
-	// Past the bound with no return traffic: degraded.
-	if got := m.dataPlaneState(now.Add(2*time.Minute), dataPlaneDegradedAfter); got != stateDataPlaneDegraded {
-		t.Fatalf("up-only past bound = %q, want %q", got, stateDataPlaneDegraded)
+	if got := m.dataPlaneState(now.Add(90*time.Second + 1*time.Millisecond)); got != stateNoReturnTraffic {
+		t.Fatalf("up-only past bound = %q, want %q", got, stateNoReturnTraffic)
 	}
 
-	// Return traffic arrives: ready, and it stays ready even if quiet later
-	// (first-packet timestamps are what count).
 	m.markDown(200)
-	if got := m.dataPlaneState(now.Add(10*time.Minute), dataPlaneDegradedAfter); got != stateDataPlaneReady {
-		t.Fatalf("bidirectional session = %q, want %q", got, stateDataPlaneReady)
+	if got := m.dataPlaneState(now.Add(10 * time.Minute)); got != stateBidirectionalSeen {
+		t.Fatalf("bidirectional session = %q, want %q", got, stateBidirectionalSeen)
+	}
+}
+
+// Audit point 7: the poll cadence must keep detection within ~bound+poll,
+// not bound+statsTick.
+func TestDegradedPollCadenceBoundsDetection(t *testing.T) {
+	if degradedPollInterval > dataPlaneDegradedAfter/6 {
+		t.Fatalf("poll %s too coarse for a %s bound", degradedPollInterval, dataPlaneDegradedAfter)
 	}
 }
 
@@ -53,12 +79,12 @@ func TestMetricsSnapshotSanitized(t *testing.T) {
 	m.markUp(100)
 	m.markUp(50)
 	m.markDown(75)
-	line := m.snapshot("abcd1234", time.Now(), dataPlaneDegradedAfter)
+	line := m.snapshot("abcd1234", time.Now())
 	for _, want := range []string{
 		"session=abcd1234",
 		"up_frames=2 up_bytes=150",
 		"down_frames=1 down_bytes=75",
-		"state=DATA PLANE READY",
+		"state=BIDIRECTIONAL_OBSERVED",
 		"down_first=",
 	} {
 		if !strings.Contains(line, want) {
@@ -80,19 +106,31 @@ func TestReasonBoxFirstReasonWins(t *testing.T) {
 	}
 }
 
-func TestSanitizeReasonBoundsAndFlattens(t *testing.T) {
-	long := errors.New(strings.Repeat("x", 500))
-	got := sanitizeReason(long)
-	if len(got) != 160 {
-		t.Fatalf("truncated reason length = %d, want 160", len(got))
+// Audit point 8: every control character must be neutralized — a forged
+// error must not be able to forge log lines or smuggle escapes.
+func TestSanitizeReasonNeutralizesAllControls(t *testing.T) {
+	cases := map[string]string{
+		"a\nb":      "a b",
+		"a\rb":      "a b",
+		"a\tb":      "a b",
+		"a\x1b[2Jb": "a [2Jb",
+		"a\x00b":    "a b",
+		"a\x7fb":    "a b",
+		"plain":     "plain",
 	}
-	if sanitizeReason(errors.New("a\nb")) != "a b" {
-		t.Fatal("newline must be flattened")
+	for in, want := range cases {
+		if got := sanitizeReason(errors.New(in)); got != want {
+			t.Fatalf("sanitize(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if len(sanitizeReason(errors.New(strings.Repeat("x", 500)))) > 160 {
+		t.Fatal("length bound must hold")
 	}
 	if sanitizeReason(nil) != "nil" {
 		t.Fatal("nil error must render as nil")
 	}
-	if len(fmt.Sprint(sanitizeReason(errors.New("ok")))) < 2 {
-		t.Fatal("short reasons pass through")
+	// Unicode passes through untouched.
+	if got := sanitizeReason(errors.New("cañón")); got != "cañón" {
+		t.Fatalf("unicode mangled: %q", got)
 	}
 }

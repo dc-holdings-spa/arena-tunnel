@@ -103,8 +103,15 @@ func runShovel(
 			}
 		}
 		sessionID := newSessionID()
+		// Same id on both ends: the terminador echoes it in its logs via
+		// this header (audit point 3).
+		headers := wsHeaders.Clone()
+		if headers == nil {
+			headers = http.Header{}
+		}
+		headers.Set("X-Arena-Session", sessionID)
 		log.Printf("[wss] dialing %s session=%s", wsURL, sessionID)
-		ws, resp, err := dialer.Dial(wsURL, wsHeaders)
+		ws, resp, err := dialer.Dial(wsURL, headers)
 		if err != nil {
 			status := 0
 			if resp != nil {
@@ -180,7 +187,28 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn,
 		for {
 			select {
 			case <-ticker.C:
-				log.Printf("[stats] %s", metrics.snapshot(sessionID, time.Now(), dataPlaneDegradedAfter))
+				log.Printf("[stats] %s", metrics.snapshot(sessionID, time.Now()))
+			case <-subCtx.Done():
+				return
+			}
+		}
+	}()
+
+	// Transition watcher: logs every observed-state change at a cadence
+	// that catches the 90 s NO_RETURN_TRAFFIC flip within ~bound+poll,
+	// instead of waiting for the next 60 s stats line (audit point 7).
+	go func() {
+		last := ""
+		ticker := time.NewTicker(degradedPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cur := metrics.dataPlaneState(time.Now())
+				if cur != last {
+					log.Printf("[state] %s session=%s", cur, sessionID)
+					last = cur
+				}
 			case <-subCtx.Done():
 				return
 			}
@@ -254,7 +282,6 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn,
 				case peerCh <- peer:
 				default:
 				}
-				log.Printf("[state] %s session=%s (first local WG packet seen)", stateWgHandshake, sessionID)
 			}
 			if err := writeWS(websocket.BinaryMessage, buf[:n]); err != nil {
 				// Suppress noise when the connection was closed intentionally
@@ -299,10 +326,12 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn,
 				log.Printf("[udp] write: %v", err)
 				return
 			}
-			if metrics.framesDown.Add(1) == 1 {
-				log.Printf("[state] %s session=%s (first return traffic received)", stateDataPlaneReady, sessionID)
+			// Single mutation per frame (audit point 1): markDown bumps the
+			// counter and reports whether this was the session's first
+			// return frame.
+			if metrics.markDown(len(data)) {
+				log.Printf("[state] %s session=%s (first return frame re-injected)", stateBidirectionalSeen, sessionID)
 			}
-			metrics.markDown(len(data))
 		}
 	}()
 
@@ -541,6 +570,14 @@ func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
 
 // runDefault is the BOOTSTRAP → PAIR-if-needed → CONNECT path.
 func runDefault(ctx context.Context, rf *rootFlags) int {
+	// Durable rotated log BEFORE anything else: a scheduled-task start that
+	// dies during preflight must still leave a trace (audit point 6).
+	// Subcommands (pair/logout/version/…) never reach here, so they stay
+	// clean of side effects.
+	if sink := installDurableLog(); sink != nil {
+		defer sink.Close()
+	}
+
 	// Enforce single-instance via PID lock file. We do this before any
 	// network activity so a second invocation fails fast with a clear message.
 	if !acquirePIDLock() {
@@ -676,11 +713,6 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 // runConnect is the CONNECT state: stand up WG + TUN + WSS shovel and
 // block on SIGINT.
 func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
-	// Durable rotated log first: every later line survives a task-based
-	// start with no console attached (#2607).
-	if sink := installDurableLog(); sink != nil {
-		defer sink.Close()
-	}
 	if cfg.PrivateKey == "" || cfg.ServerPubKey == "" || cfg.TunnelIP == "" {
 		log.Printf("[connect] missing creds (priv/pub/ip)")
 		return ExitFatalRuntime

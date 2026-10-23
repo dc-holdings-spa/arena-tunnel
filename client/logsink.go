@@ -5,9 +5,11 @@
 // $XDG_STATE_HOME/arena-tunnel (elsewhere), rotating by size so a stuck
 // loop can never fill the disk.
 //
-// Files are created 0600 — owner-only on Windows (the interactive user
-// running the task) and on Unix. No tokens, keys or cookies are ever
-// logged by the client; the sink itself adds no content.
+// ACL note (audit point 4): on Windows, POSIX modes on OpenFile/MkdirAll
+// do NOT set a private DACL. restrictToOwner() (logsink_windows.go)
+// applies an explicit owner-only protected DACL to the directory and the
+// file; other platforms use 0600/0700 which is the native guarantee.
+// No tokens, keys or cookies are ever logged by the client.
 package main
 
 import (
@@ -21,7 +23,15 @@ import (
 
 const (
 	logMaxBytes = 5 << 20 // rotate at 5 MiB
-	logKeep     = 3       // arena-tunnel.log, .1, .2, .3
+	logKeep     = 3       // arena-tunnel-task.log, .1, .2, .3
+)
+
+// osRename/osRemove are indirections so tests can simulate Windows
+// rename semantics (fails when the destination exists) on Linux
+// (audit point 5).
+var (
+	osRename = os.Rename
+	osRemove = os.Remove
 )
 
 // durableLogPath returns the per-user log location.
@@ -59,16 +69,27 @@ func newRotatingSink(path string, maxSize int64, keep int) (*rotatingSink, error
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
+	if err := restrictToOwner(filepath.Dir(path)); err != nil {
+		// Non-fatal: the path is already per-user; keep going but record it.
+		log.Printf("[log] owner ACL on %s failed: %v", filepath.Dir(path), err)
+	}
 	s := &rotatingSink{path: path, maxSize: maxSize, keep: keep, mu: make(chan struct{}, 1)}
 	s.mu <- struct{}{}
-	if err := s.open(); err != nil {
+	if err := s.open(false); err != nil {
 		return nil, err
+	}
+	if err := restrictToOwner(path); err != nil {
+		log.Printf("[log] owner ACL on %s failed: %v", path, err)
 	}
 	return s, nil
 }
 
-func (s *rotatingSink) open() error {
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+func (s *rotatingSink) open(truncate bool) error {
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if truncate {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
+	f, err := os.OpenFile(s.path, flags, 0o600)
 	if err != nil {
 		return err
 	}
@@ -81,14 +102,26 @@ func (s *rotatingSink) open() error {
 	return nil
 }
 
-// rotate shifts arena-tunnel-task.log.(keep-1) → .keep, ..., .1 → .2,
-// then renames the live file to .1.
-func (s *rotatingSink) rotate() {
-	_ = s.f.Close()
-	for i := s.keep - 1; i >= 1; i-- {
-		_ = os.Rename(fmt.Sprintf("%s.%d", s.path, i), fmt.Sprintf("%s.%d", s.path, i+1))
+// rotate deletes the oldest archive first, then shifts .1→.2→.3 and
+// renames the live file to .1. Windows rename does NOT replace an
+// existing destination, so every destination is explicitly removed
+// before its rename (audit point 5); errors are propagated instead of
+// being silently ignored.
+func (s *rotatingSink) rotate() error {
+	if err := osRemove(fmt.Sprintf("%s.%d", s.path, s.keep)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove oldest archive: %w", err)
 	}
-	_ = os.Rename(s.path, s.path+".1")
+	for i := s.keep - 1; i >= 1; i-- {
+		src := fmt.Sprintf("%s.%d", s.path, i)
+		dst := fmt.Sprintf("%s.%d", s.path, i+1)
+		if err := osRename(src, dst); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("shift %s: %w", src, err)
+		}
+	}
+	if err := osRename(s.path, s.path+".1"); err != nil {
+		return fmt.Errorf("archive live log: %w", err)
+	}
+	return nil
 }
 
 func (s *rotatingSink) Write(p []byte) (int, error) {
@@ -96,8 +129,16 @@ func (s *rotatingSink) Write(p []byte) (int, error) {
 	defer func() { s.mu <- struct{}{} }()
 
 	if s.n+int64(len(p)) > s.maxSize {
-		s.rotate()
-		if err := s.open(); err != nil {
+		_ = s.f.Close()
+		if err := s.rotate(); err != nil {
+			// Rotation failed (e.g. a rotated file locked by a backup
+			// scanner). Bounded growth beats silent inflation: truncate
+			// the live file and keep the sink usable, loudly.
+			log.Printf("[log] rotation failed (%v) — truncating %s to stay bounded", err, s.path)
+			if err := s.open(true); err != nil {
+				return 0, err
+			}
+		} else if err := s.open(false); err != nil {
 			return 0, err
 		}
 	}

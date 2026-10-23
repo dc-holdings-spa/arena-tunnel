@@ -73,3 +73,37 @@ func TestOpenedAtSet(t *testing.T) {
 		t.Fatal("openedAt must be initialized to now")
 	}
 }
+
+// Audit point 3: the client correlation id is accepted only when it is
+// strictly 8 lowercase hex — hostile headers must never reach the logs.
+func TestSessionIDFromHeader(t *testing.T) {
+	valid := []string{"0123456789abcdef"[:8], "deadbeef", "00000000", "f" + "edcba98"}
+	for _, v := range valid {
+		if got, ok := sessionIDFromHeader(v); !ok || got != v {
+			t.Fatalf("header %q rejected, want accepted verbatim", v)
+		}
+	}
+	invalid := []string{
+		"", "abc", "abcdefghi", "ABCDEFGH", "deadbee!", "dead beef",
+		"deadbeef\n", "\x00eadbeef", "t1758", "1234567 ",
+	}
+	for _, v := range invalid {
+		if _, ok := sessionIDFromHeader(v); ok {
+			t.Fatalf("header %q accepted, want rejected", v)
+		}
+	}
+}
+
+// Audit point 9: negative intervals are rejected by the same predicate
+// main() uses; zero stays legal (documented "disabled").
+func TestStatsIntervalValidation(t *testing.T) {
+	if err := checkStatsInterval(0); err != nil {
+		t.Fatalf("0 must be legal (disabled): %v", err)
+	}
+	if err := checkStatsInterval(time.Second); err != nil {
+		t.Fatalf("positive must be legal: %v", err)
+	}
+	if err := checkStatsInterval(-time.Second); err == nil {
+		t.Fatal("negative must be rejected")
+	}
+}

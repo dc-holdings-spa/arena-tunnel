@@ -49,6 +49,22 @@ func newSessionID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// sessionIDFromHeader validates the client's correlation id. Strict
+// 8-lowercase-hex: anything else is rejected so a hostile header can
+// never smuggle log-injection material into our logs (audit point 3).
+func sessionIDFromHeader(v string) (string, bool) {
+	if len(v) != 8 {
+		return "", false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", false
+		}
+	}
+	return v, true
+}
+
 var (
 	listenAddr    = flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
 	wgTarget      = flag.String("wg", "127.0.0.1:51820", "WireGuard server UDP target")
@@ -141,7 +157,11 @@ func (t *tunnel) statsLine(prefix string) string {
 
 // statsLoop emits a sanitized stats line every statsInterval so a slow
 // data-plane recovery is visible while it happens, not only at close.
+// Zero disables it (documented); negatives are rejected at startup.
 func (t *tunnel) statsLoop() {
+	if *statsInterval <= 0 {
+		return
+	}
 	ticker := time.NewTicker(*statsInterval)
 	defer ticker.Stop()
 	for {
@@ -313,6 +333,14 @@ func handleTunnel(w http.ResponseWriter, r *http.Request) {
 	arenaToken := r.Header.Get("X-Arena-Token")
 
 	t := newTunnel(ws, udp, clientIP, arenaToken)
+	// Correlate with the client's session id when it is strictly valid;
+	// otherwise keep our random id and note the rejection (length only —
+	// never the raw header content).
+	if clientSession, ok := sessionIDFromHeader(r.Header.Get("X-Arena-Session")); ok {
+		t.sessionID = clientSession
+	} else if raw := r.Header.Get("X-Arena-Session"); raw != "" {
+		log.Printf("[+] session header rejected (len=%d) session=%s — using server id", len(raw), t.sessionID)
+	}
 	activeConns.Add(1)
 	// The UDP local port is what WireGuard learns as this session's peer
 	// endpoint — log it so a stale-endpoint association is diagnosable.
@@ -333,8 +361,20 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "ok active=%d\n", activeConns.Load())
 }
 
+// checkStatsInterval validates the stats flag: zero disables stats,
+// anything negative is a configuration error (audit point 9).
+func checkStatsInterval(d time.Duration) error {
+	if d < 0 {
+		return fmt.Errorf("invalid -stats-interval %s: must be >= 0 (0 disables stats)", d)
+	}
+	return nil
+}
+
 func main() {
 	flag.Parse()
+	if err := checkStatsInterval(*statsInterval); err != nil {
+		log.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tunnel", handleTunnel)
 	mux.HandleFunc("/healthz", handleHealth)
