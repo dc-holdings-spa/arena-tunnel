@@ -39,11 +39,14 @@ func TestRotatingSinkAppliesOwnerOnlyDACL(t *testing.T) {
 
 	for _, target := range []string{dir, path} {
 		sddl := effectiveSDDL(t, target)
-		if !strings.Contains(sddl, "P") { // protected DACL flag inside the D: section
+		if !strings.Contains(sddl, "D:P") { // protected DACL flag, not an unrelated P elsewhere
 			t.Fatalf("%s DACL not protected (inherited ACEs may re-add access): %s", target, sddl)
 		}
 		for _, forbidden := range []string{"WD", "AU", "BU"} { // everyone, authenticated, built-in users
-			if strings.Contains(sddl, "("+"A;;"+forbidden) {
+			// An allow ACE is shaped `(A;flags;rights;object;inherit;trustee)`;
+			// matching `(A;;<trustee>` misses normal rights such as FA and
+			// would let `(A;;FA;;;WD)` pass. Trustee is the final field.
+			if strings.Contains(sddl, ";;;"+forbidden+")") {
 				t.Fatalf("%s DACL grants group %s: %s", target, forbidden, sddl)
 			}
 		}

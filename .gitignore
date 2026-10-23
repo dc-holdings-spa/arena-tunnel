@@ -1,2 +1,20 @@
+dist/
+vendor/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local secrets
+*.priv
+*.priv.key
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
 server/server
 client/client
