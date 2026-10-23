@@ -16,3 +16,5 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+server/server
+client/client

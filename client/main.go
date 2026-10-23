@@ -102,14 +102,22 @@ func runShovel(
 				return defaultDialer.DialContext(dialCtx, network, address)
 			}
 		}
-		log.Printf("[wss] dialing %s", wsURL)
-		ws, resp, err := dialer.Dial(wsURL, wsHeaders)
+		sessionID := newSessionID()
+		// Same id on both ends: the terminador echoes it in its logs via
+		// this header (audit point 3).
+		headers := wsHeaders.Clone()
+		if headers == nil {
+			headers = http.Header{}
+		}
+		headers.Set("X-Arena-Session", sessionID)
+		log.Printf("[wss] dialing %s session=%s", wsURL, sessionID)
+		ws, resp, err := dialer.Dial(wsURL, headers)
 		if err != nil {
 			status := 0
 			if resp != nil {
 				status = resp.StatusCode
 			}
-			log.Printf("[wss] dial failed status=%d err=%v — retry 3s", status, err)
+			log.Printf("[wss] dial failed session=%s status=%d err=%v — retry 3s", sessionID, status, sanitizeReason(err))
 			select {
 			case <-time.After(3 * time.Second):
 			case <-ctx.Done():
@@ -117,13 +125,13 @@ func runShovel(
 			}
 			continue
 		}
-		log.Printf("[wss] connected")
+		log.Printf("[wss] connected session=%s", sessionID)
 		select {
 		case connected <- struct{}{}:
 		default:
 		}
-		runOneTunnel(ctx, udpConn, ws)
-		log.Printf("[wss] connection closed — reconnecting")
+		reason := runOneTunnel(ctx, udpConn, ws, sessionID)
+		log.Printf("[wss] connection closed session=%s reason=%s — reconnecting", sessionID, reason)
 	}
 }
 
@@ -160,11 +168,52 @@ const (
 	wssReadTimeout       = 90 * time.Second
 )
 
-// runOneTunnel runs the bidirectional shovel until either side dies, then returns.
-func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn) {
+// runOneTunnel runs the bidirectional shovel until either side dies, then
+// returns a sanitized reason for the reconnect log (#2607 D0: session id,
+// per-direction counters and separated data-plane states).
+func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn, sessionID string) string {
 	defer ws.Close()
 	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	metrics := &tunnelMetrics{}
+	reason := &reasonBox{}
+
+	// Periodic sanitized stats: proves (or disproves) bidirectionality from
+	// the client side without any payload material.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				log.Printf("[stats] %s", metrics.snapshot(sessionID, time.Now()))
+			case <-subCtx.Done():
+				return
+			}
+		}
+	}()
+
+	// Transition watcher: logs every observed-state change at a cadence
+	// that catches the 90 s NO_RETURN_TRAFFIC flip within ~bound+poll,
+	// instead of waiting for the next 60 s stats line (audit point 7).
+	go func() {
+		last := ""
+		ticker := time.NewTicker(degradedPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cur := metrics.dataPlaneState(time.Now())
+				if cur != last {
+					log.Printf("[state] %s session=%s", cur, sessionID)
+					last = cur
+				}
+			case <-subCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// gorilla/websocket allows exactly one concurrent writer per connection.
 	// This tunnel has THREE goroutines that write to ws: the ping handler
@@ -223,6 +272,7 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 		for {
 			n, peer, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
+				reason.setf("udp read: %s", sanitizeReason(err))
 				log.Printf("[udp] read: %v", err)
 				return
 			}
@@ -239,8 +289,10 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 				if subCtx.Err() == nil {
 					log.Printf("[wss] write: %v", err)
 				}
+				reason.setf("wss write: %s", sanitizeReason(err))
 				return
 			}
+			metrics.markUp(n)
 		}
 	}()
 
@@ -250,6 +302,7 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 		for {
 			typ, data, err := ws.ReadMessage()
 			if err != nil {
+				reason.setf("wss read: %s", sanitizeReason(err))
 				log.Printf("[wss] read: %v", err)
 				return
 			}
@@ -269,13 +322,21 @@ func runOneTunnel(ctx context.Context, udpConn *net.UDPConn, ws *websocket.Conn)
 				}
 			}
 			if _, err := udpConn.WriteToUDP(data, wgPeer); err != nil {
+				reason.setf("udp write: %s", sanitizeReason(err))
 				log.Printf("[udp] write: %v", err)
 				return
+			}
+			// Single mutation per frame (audit point 1): markDown bumps the
+			// counter and reports whether this was the session's first
+			// return frame.
+			if metrics.markDown(len(data)) {
+				log.Printf("[state] %s session=%s (first return frame re-injected)", stateBidirectionalSeen, sessionID)
 			}
 		}
 	}()
 
 	<-subCtx.Done()
+	return reason.get()
 }
 
 // configureTUN and teardownTUN are implemented per-OS in
@@ -509,6 +570,16 @@ func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
 
 // runDefault is the BOOTSTRAP → PAIR-if-needed → CONNECT path.
 func runDefault(ctx context.Context, rf *rootFlags) int {
+	// Durable rotated log BEFORE anything else: a scheduled-task start that
+	// dies during preflight must still leave a trace (audit point 6).
+	// runDefault also hosts the `pair` subcommand (via dispatchSubcommand),
+	// which is fine: pairing immediately connects, so the durable log is
+	// wanted there too. One-shot subcommands (logout/version/status/help)
+	// never reach here.
+	if sink := installDurableLog(); sink != nil {
+		defer sink.Close()
+	}
+
 	// Enforce single-instance via PID lock file. We do this before any
 	// network activity so a second invocation fails fast with a clear message.
 	if !acquirePIDLock() {
