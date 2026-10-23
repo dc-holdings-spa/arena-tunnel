@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRotatingSinkRotatesBySizeAndKeepsBound(t *testing.T) {
@@ -135,6 +138,43 @@ func TestRotatingSinkTruncatesWhenRotationIsImpossible(t *testing.T) {
 	if st.Size() > 64+18 {
 		t.Fatalf("rotation permanently failing must truncate, not grow: %d bytes", st.Size())
 	}
+}
+
+// Audit (second round): the production logger is a MultiWriter that
+// contains the sink — a log.Printf from inside Write's lock deadlocks.
+// Reproduce the EXACT production wiring, force rename failure, and prove
+// the write path terminates.
+func TestRotatingSinkNoDeadlockUnderProductionLogger(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "arena-tunnel-task.log")
+
+	oldRename := osRename
+	osRename = func(src, dst string) error { return fmt.Errorf("locked") }
+	defer func() { osRename = oldRename }()
+
+	sink, err := newRotatingSink(path, 64, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := log.Writer()
+	log.SetOutput(io.MultiWriter(io.Discard, sink))
+	defer func() { log.SetOutput(restore) }()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 80; i++ {
+			// This is the recursive path: logger → sink.Write → rotation
+			// failure → (previously log.Printf → logger → sink.Write…).
+			log.Printf("line %d", i)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sink.Write deadlocked under the production MultiWriter logger")
+	}
+	_ = sink.Close()
 }
 
 func TestDurableLogPathIsPerUser(t *testing.T) {

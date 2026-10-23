@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestNewSessionIDShapeAndUniqueness(t *testing.T) {
@@ -123,7 +124,7 @@ func TestSanitizeReasonNeutralizesAllControls(t *testing.T) {
 			t.Fatalf("sanitize(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if len(sanitizeReason(errors.New(strings.Repeat("x", 500)))) > 160 {
+	if len(sanitizeReason(errors.New(strings.Repeat("x", 500)))) > sanitizeMaxBytes {
 		t.Fatal("length bound must hold")
 	}
 	if sanitizeReason(nil) != "nil" {
@@ -132,5 +133,48 @@ func TestSanitizeReasonNeutralizesAllControls(t *testing.T) {
 	// Unicode passes through untouched.
 	if got := sanitizeReason(errors.New("cañón")); got != "cañón" {
 		t.Fatalf("unicode mangled: %q", got)
+	}
+}
+
+// Audit (second round): the byte bound must hold with multibyte runes at
+// the edge — never overshoot, never emit broken UTF-8.
+func TestSanitizeReasonUnicodeEdge(t *testing.T) {
+	// 159 ASCII bytes + one 4-byte rune: the rune must be dropped whole.
+	got := sanitizeReason(errors.New(strings.Repeat("a", 159) + "\U0001F600"))
+	if len(got) != 159 {
+		t.Fatalf("overshoot edge: len=%d, want 159", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("broken UTF-8: %q", got)
+	}
+
+	// 158 ASCII + one 2-byte rune: exactly 160, rune kept whole.
+	got = sanitizeReason(errors.New(strings.Repeat("a", 158) + "é"))
+	if len(got) != 160 || !strings.HasSuffix(got, "é") {
+		t.Fatalf("fitting multibyte mangled: len=%d tail=%q", len(got), got[155:])
+	}
+
+	// 500 multibyte runes: bound holds and output stays valid UTF-8.
+	got = sanitizeReason(errors.New(strings.Repeat("ñ", 500)))
+	if len(got) > sanitizeMaxBytes || !utf8.ValidString(got) {
+		t.Fatalf("multibyte flood: len=%d valid=%v", len(got), utf8.ValidString(got))
+	}
+}
+
+// Audit (second round): the entropy-failure fallback must still produce a
+// strictly valid 8-lowercase-hex id — the terminador drops anything else.
+func TestNewSessionIDFallbackHonorsContract(t *testing.T) {
+	old := randRead
+	randRead = func([]byte) (int, error) { return 0, errors.New("entropy gone") }
+	defer func() { randRead = old }()
+
+	for i := 0; i < 20; i++ {
+		id := newSessionID()
+		if len(id) != 8 || strings.Trim(id, "0123456789abcdef") != "" {
+			t.Fatalf("fallback id %q violates the 8-hex contract", id)
+		}
+		if id == newSessionID() && i > 0 {
+			t.Log("fallback ids repeat within the same nanosecond — acceptable degrades, still correlatable")
+		}
 	}
 }

@@ -572,8 +572,10 @@ func dispatchSubcommand(ctx context.Context, rf *rootFlags) int {
 func runDefault(ctx context.Context, rf *rootFlags) int {
 	// Durable rotated log BEFORE anything else: a scheduled-task start that
 	// dies during preflight must still leave a trace (audit point 6).
-	// Subcommands (pair/logout/version/…) never reach here, so they stay
-	// clean of side effects.
+	// runDefault also hosts the `pair` subcommand (via dispatchSubcommand),
+	// which is fine: pairing immediately connects, so the durable log is
+	// wanted there too. One-shot subcommands (logout/version/status/help)
+	// never reach here.
 	if sink := installDurableLog(); sink != nil {
 		defer sink.Close()
 	}

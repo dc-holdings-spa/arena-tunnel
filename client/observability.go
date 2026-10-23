@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // tunnelMetrics counts one shovel session, both directions.
@@ -121,16 +122,20 @@ func orNever(s string) string {
 	return s
 }
 
+// randRead is injectable so tests can exercise the entropy-failure
+// fallback (audit: the fallback must still honor the 8-hex contract).
+var randRead = rand.Read
+
 // newSessionID returns a random, non-secret 8-hex id used to correlate
 // log lines of one WSS session. The SAME id is sent to the terminador in
 // the X-Arena-Session header so both ends log one shared correlation id
-// (audit point 3).
+// (audit point 3). The fallback path also yields exactly 8 lowercase hex
+// — the terminador's strict validator would drop any other shape, and
+// correlation must survive entropy degradation too.
 func newSessionID() string {
 	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// rand failing is effectively impossible on supported platforms;
-		// fall back to a time-derived id rather than crashing the tunnel.
-		return fmt.Sprintf("t%x", time.Now().UnixNano()&0xffffffff)
+	if _, err := randRead(b[:]); err != nil {
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
 	}
 	return hex.EncodeToString(b[:])
 }
@@ -162,21 +167,31 @@ func (r *reasonBox) get() string {
 
 // sanitizeReason neutralizes every control character (CR, tabs, escapes —
 // anything below 0x20 plus DEL) so a hostile or garbled error string can
-// never inject log lines, then bounds the length (audit point 8).
+// never inject log lines, then bounds the length. The bound is checked in
+// BYTES before each rune is appended, so multibyte runes are either kept
+// whole or dropped — the result is always valid UTF-8 within 160 bytes
+// (audit: unicode at the edge used to overshoot).
 func sanitizeReason(err error) string {
 	if err == nil {
 		return "nil"
 	}
 	var b strings.Builder
 	for _, r := range err.Error() {
+		size := utf8.RuneLen(r)
 		if r < 0x20 || r == 0x7f {
+			size = 1 // rendered as a single space
+		}
+		if b.Len()+size > sanitizeMaxBytes {
+			break
+		}
+		if size == 1 && (r < 0x20 || r == 0x7f) {
 			b.WriteByte(' ')
 			continue
 		}
 		b.WriteRune(r)
-		if b.Len() >= 160 {
-			break
-		}
 	}
 	return b.String()
 }
+
+// sanitizeMaxBytes bounds sanitized reasons.
+const sanitizeMaxBytes = 160

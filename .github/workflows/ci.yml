@@ -99,3 +99,33 @@ jobs:
 
       - name: go vet (client)
         run: cd client && go vet ./...
+
+  test:
+    name: Tests (ubuntu, race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: |
+            client/go.sum
+            server/go.sum
+      - name: go test -race (server)
+        run: cd server && go test -race -count=1 ./...
+      - name: go test -race (client)
+        run: cd client && go test -race -count=1 ./...
+
+  test-windows:
+    name: Tests (windows, native ACL + rotation)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: |
+            client/go.sum
+            server/go.sum
+      - name: go test (client, incl. windows_acl_test)
+        run: cd client && go test -count=1 ./...

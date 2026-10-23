@@ -39,12 +39,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// randRead is injectable so tests can exercise the entropy-failure
+// fallback.
+var randRead = rand.Read
+
 // newSessionID returns a random, non-secret 8-hex id used to correlate
-// every log line of one WSS session (#2607 D0).
+// every log line of one WSS session (#2607 D0). The fallback also yields
+// exactly 8 lowercase hex — sessionIDFromHeader's strict validator would
+// drop any other shape, and correlation must survive entropy degradation.
 func newSessionID() string {
 	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("t%x", time.Now().UnixNano()&0xffffffff)
+	if _, err := randRead(b[:]); err != nil {
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
 	}
 	return hex.EncodeToString(b[:])
 }

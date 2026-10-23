@@ -66,20 +66,31 @@ type rotatingSink struct {
 }
 
 func newRotatingSink(path string, maxSize int64, keep int) (*rotatingSink, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := restrictToOwner(filepath.Dir(path)); err != nil {
-		// Non-fatal: the path is already per-user; keep going but record it.
-		log.Printf("[log] owner ACL on %s failed: %v", filepath.Dir(path), err)
+	// Fail-closed on the ACL (audit: best-effort is not a guarantee): if
+	// we cannot guarantee owner-only access, we must not persist the log
+	// at all — the tunnel keeps running on stderr.
+	if err := restrictToOwner(dir); err != nil {
+		return nil, fmt.Errorf("owner ACL on %s: %w", dir, err)
 	}
+	_, statErr := os.Stat(path)
+	createdByUs := os.IsNotExist(statErr)
 	s := &rotatingSink{path: path, maxSize: maxSize, keep: keep, mu: make(chan struct{}, 1)}
 	s.mu <- struct{}{}
 	if err := s.open(false); err != nil {
 		return nil, err
 	}
 	if err := restrictToOwner(path); err != nil {
-		log.Printf("[log] owner ACL on %s failed: %v", path, err)
+		_ = s.Close()
+		// Never leave behind a log file we could not protect — but only
+		// remove what this attempt created.
+		if createdByUs {
+			_ = os.Remove(path)
+		}
+		return nil, fmt.Errorf("owner ACL on %s: %w", path, err)
 	}
 	return s, nil
 }
@@ -133,8 +144,11 @@ func (s *rotatingSink) Write(p []byte) (int, error) {
 		if err := s.rotate(); err != nil {
 			// Rotation failed (e.g. a rotated file locked by a backup
 			// scanner). Bounded growth beats silent inflation: truncate
-			// the live file and keep the sink usable, loudly.
-			log.Printf("[log] rotation failed (%v) — truncating %s to stay bounded", err, s.path)
+			// the live file and keep the sink usable. NOTE: report via
+			// direct stderr — the process logger may be a MultiWriter
+			// that contains THIS sink, and log.Printf from inside the
+			// lock would deadlock (audit: recursive-write freeze).
+			fmt.Fprintf(os.Stderr, "[log] rotation failed (%v) — truncating %s to stay bounded\n", err, s.path)
 			if err := s.open(true); err != nil {
 				return 0, err
 			}
