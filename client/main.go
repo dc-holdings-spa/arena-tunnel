@@ -691,6 +691,7 @@ func runDefault(ctx context.Context, rf *rootFlags) int {
 			if latestVer != "" && latestVer != version {
 				log.Printf("[!] update available: %s → %s. Download from Weapons tab.", version, latestVer)
 			}
+			cleanupArenaTrustIfRevoked(revoked)
 			if revoked {
 				log.Println("[!] stored peer has been revoked — wiping config and re-pairing.")
 				_ = WipeConfig(path)
@@ -904,6 +905,7 @@ func runConnect(ctx context.Context, rf *rootFlags, cfg *Config) int {
 							log.Printf("[!] update available: %s → %s. Download from Weapons tab.", version, latestVer)
 						})
 					}
+					cleanupArenaTrustIfRevoked(revoked)
 					if revoked {
 						log.Println("[!] peer revoked server-side — shutting down. Run `arena-tunnel pair` to re-pair.")
 						cancel()
@@ -957,6 +959,7 @@ func runLogout(ctx context.Context, rf *rootFlags) int {
 		log.Printf("[logout] read %s: %v", path, lerr)
 	}
 	if cfg == nil {
+		cleanupArenaTrust()
 		fmt.Println("No config to remove.")
 		return ExitOK
 	}
@@ -976,6 +979,7 @@ func runLogout(ctx context.Context, rf *rootFlags) int {
 		fmt.Fprintf(os.Stderr, "[logout] could not wipe %s: %v\n", path, err)
 		return ExitConfigUnlinkFailed
 	}
+	cleanupArenaTrust()
 
 	// Tear down anything install.sh left behind: the systemd unit that
 	// would otherwise resurrect the tunnel on next boot with a wiped
@@ -988,6 +992,23 @@ func runLogout(ctx context.Context, rf *rootFlags) int {
 
 	fmt.Println("Logged out. Config wiped.")
 	return ExitOK
+}
+
+// cleanupArenaTrust removes only trust material installed by Arena's official
+// Remote Operator installer. It is intentionally best-effort: revocation and
+// config cleanup must not be blocked by a damaged OS trust store.
+var platformArenaTrustCleanup = cleanupPlatformArenaTrust
+
+func cleanupArenaTrust() {
+	if err := platformArenaTrustCleanup(); err != nil {
+		log.Printf("[trust] Arena TeamServer certificate cleanup failed: %v", err)
+	}
+}
+
+func cleanupArenaTrustIfRevoked(revoked bool) {
+	if revoked {
+		cleanupArenaTrust()
+	}
 }
 
 // teardownInstallLeftovers removes the arena-tunnel.service unit and
